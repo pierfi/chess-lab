@@ -1,0 +1,36 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Runtime directories
+queue/
+archive/
+error/
+
+# Docs (generated/local)
+docs/notes/
+docs/drafts/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Claude Code local state (personal, not project source)
+.claude/settings.local.json
+.claude/projects/
