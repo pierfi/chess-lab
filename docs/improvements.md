@@ -5,6 +5,32 @@ Formato per voce: pitch / approccio / stato / branch.
 
 ---
 
+## Export PGN della partita
+
+**Branch:** `feature/pgn-export`
+**Stato:** Implementato, in attesa di merge
+**Richiesto da:** utente, 11 luglio 2026
+
+**Pitch:** poter scaricare la partita corrente (in corso o conclusa) come file `.pgn`,
+per passarla a tool esterni di analisi (Lichess, ChessBase, SCID, ecc.), come fanno i
+maggiori programmi di scacchi.
+
+**Approccio:** il backend costruisce già una stringa PGN completa ad ogni risposta di
+stato (`_board_to_state()` in `backend/main.py`, campo `"pgn"`) — nessuna modifica
+backend necessaria. Verificato che `chess.pgn.Game()` imposta di default l'header
+`Result` a `"*"` (partita in corso/risultato sconosciuto), quindi il PGN di una
+partita non ancora finita è già valido secondo spec, importabile così com'è.
+Lato frontend: `state.pgn` cattura `data.pgn` ad ogni `updateState()`, un bottone
+"Esporta PGN" in toolbar (disabilitato finché non c'è almeno una mossa) triggera
+`downloadPgn()`, che crea un `Blob` e un `<a download>` temporaneo per scaricare
+`chesslab-<game_id>.pgn`.
+
+**Nota:** puro frontend, nessun nuovo endpoint. Vedi anche la voce Fase 3 in
+CLAUDE.md — l'export era già previsto lì solo per l'import; l'export è stato
+anticipato qui.
+
+---
+
 ## Analysis Panel v2 — tabella a due colonne + curva eval
 
 **Pitch:** il pannello di analisi post-partita (`Analizza` → `POST /game/analyze`) mostrava una lista piatta di semimosse, una riga per ply: difficile capire a colpo d'occhio quale colore avesse giocato cosa. Richiesta esplicita dell'utente: riorganizzare in due colonne Bianco | Nero raggruppate per numero di mossa, come una score-sheet PGN. In aggiunta (concordato, non richiesto): curva eval in centipawn sull'intera partita con marker su blunder/errori e click-to-jump verso la riga corrispondente — di fatto un'anticipazione della riga "Grafico eval" di Fase 5.
