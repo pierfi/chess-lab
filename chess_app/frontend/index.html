@@ -125,40 +125,21 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 42px;
   line-height: 1;
   cursor: pointer;
   position: relative;
   user-select: none;
-  /* Font esplicito per i glifi scacchistici Unicode (U+2654-265F).
-     'sans-serif' generico può risolvere, a seconda del sistema, in un font
-     senza distinzione outline/solid tra il set "white" e "black", con il
-     risultato che i pezzi appaiono con colori invertiti o indistinguibili.
-     Questi font hanno un rendering verificato e coerente con la convenzione
-     Unicode (outline = pezzo bianco, solid = pezzo nero). */
-  font-family: 'Noto Sans Symbols2', 'DejaVu Sans', 'Segoe UI Symbol', 'Arial Unicode MS', sans-serif;
 }
 
-/* Pezzi bianchi: fill chiaro + contorno scuro netto, leggibili anche su casella chiara.
-   -webkit-text-stroke per il bordo vero; le 8 ombre dure a 1px sono il fallback
-   per renderer che ignorano text-stroke. */
-.square.white-piece {
-  color: #fff;
-  -webkit-text-stroke: 1.2px #3a3a3a;
-  text-shadow:
-    -1px -1px 0 #3a3a3a,  0 -1px 0 #3a3a3a,  1px -1px 0 #3a3a3a,
-    -1px  0   0 #3a3a3a,                     1px  0   0 #3a3a3a,
-    -1px  1px 0 #3a3a3a,  0  1px 0 #3a3a3a,  1px  1px 0 #3a3a3a;
-}
-
-/* Pezzi neri: stessa tecnica con contorno chiaro sottile, per staccare dalla casella scura */
-.square.black-piece {
-  color: #222;
-  -webkit-text-stroke: 0.8px #f5f0e6;
-  text-shadow:
-    -1px -1px 0 rgba(245,240,230,0.85),  0 -1px 0 rgba(245,240,230,0.85),  1px -1px 0 rgba(245,240,230,0.85),
-    -1px  0   0 rgba(245,240,230,0.85),                                    1px  0   0 rgba(245,240,230,0.85),
-    -1px  1px 0 rgba(245,240,230,0.85),  0  1px 0 rgba(245,240,230,0.85),  1px  1px 0 rgba(245,240,230,0.85);
+/* Pezzi come veri asset SVG (set Cburnett di Lichess, vedi frontend/pieces/ e
+   docs/bugs.md Bug #6 fix v3): il colore bianco/nero è nel file stesso, non più
+   affidato a un fill CSS su un glifo Unicode dipendente dal font di sistema. */
+.piece-img {
+  width: 80%;
+  height: 80%;
+  display: block;
+  pointer-events: none;
+  user-select: none;
 }
 
 .square.white { background: var(--white-sq); }
@@ -617,15 +598,17 @@ body {
 }
 
 .promo-piece {
-  font-size: 48px;
   cursor: pointer;
   padding: 8px 14px;
   border-radius: 8px;
   transition: background 0.15s;
-  /* Stesso font stack di .square: qui non c'è nemmeno la colorazione CSS
-     white-piece/black-piece a fare da rete di sicurezza, quindi un font
-     coerente outline/solid è ancora più importante per distinguere le scelte. */
-  font-family: 'Noto Sans Symbols2', 'DejaVu Sans', 'Segoe UI Symbol', 'Arial Unicode MS', sans-serif;
+}
+
+.promo-piece img {
+  width: 48px;
+  height: 48px;
+  display: block;
+  pointer-events: none;
 }
 
 .promo-piece:hover { background: rgba(98, 153, 36, 0.2); }
@@ -751,15 +734,22 @@ let state = {
   hintLoading: false,
 };
 
-// Un solo set di glifi (quello "solid"/pieno, U+265A-265F) per entrambi i colori:
-// il set "outline" (U+2654-2659) rende come una figura sottile e vuota, che su un
-// fill CSS bianco lascia trasparente l'interno del glifo e mostra il colore della
-// casella sotto — con font di fallback inconsistenti sembra un pezzo invertito.
-// Il colore vero (bianco/nero) arriva solo da .white-piece/.black-piece in CSS.
-const PIECES = {
-  K: '♚', Q: '♛', R: '♜', B: '♝', N: '♞', P: '♟',
-  k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟',
+// Pezzi come veri asset SVG (set Cburnett di Lichess, frontend/pieces/*.svg),
+// non più glifi Unicode: nessuna dipendenza dal font di sistema per il colore
+// (vedi docs/bugs.md Bug #6 fix v3). Mappa carattere FEN -> nome file (senza estensione).
+const PIECE_FILES = {
+  K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
+  k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP',
 };
+
+function pieceImg(fenChar) {
+  const img = document.createElement('img');
+  img.className = 'piece-img';
+  img.src = `pieces/${PIECE_FILES[fenChar]}.svg`;
+  img.alt = fenChar;
+  img.draggable = false;
+  return img;
+}
 
 const FILES = 'abcdefgh';
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -939,15 +929,15 @@ function askPromotion(color) {
   return new Promise(resolve => {
     const box = document.getElementById('promo-box');
     const overlay = document.getElementById('promo-overlay');
-    // Stesso set di glifi "solid" della board (vedi PIECES): il colore vero
-    // arriva dalla classe .white-piece/.black-piece, non dal glifo stesso.
-    const pieces = [['♛','q'], ['♜','r'], ['♝','b'], ['♞','n']];
-    const colorClass = color === 'white' ? 'white-piece' : 'black-piece';
+    // Stesso set di asset SVG della board (vedi PIECE_FILES): il colore è nel
+    // file stesso, non serve più alcuna classe di colorazione CSS.
+    const pieces = [['Q','q'], ['R','r'], ['B','b'], ['N','n']];
+    const fenChar = color === 'white' ? (c => c.toUpperCase()) : (c => c.toLowerCase());
     box.innerHTML = '';
-    for (const [icon, code] of pieces) {
+    for (const [letter, code] of pieces) {
       const el = document.createElement('span');
-      el.className = 'promo-piece ' + colorClass;
-      el.textContent = icon;
+      el.className = 'promo-piece';
+      el.appendChild(pieceImg(fenChar(letter)));
       el.onclick = () => { overlay.classList.remove('visible'); resolve(code); };
       box.appendChild(el);
     }
@@ -987,9 +977,7 @@ function renderBoard() {
 
     const piece = pieceMap[sq];
     if (piece) {
-      div.textContent = PIECES[piece];
-      if (piece === piece.toLowerCase()) div.classList.add('black-piece');
-      else div.classList.add('white-piece');
+      div.appendChild(pieceImg(piece));
     }
 
     // Coordinate stile Lichess: rank sull'ultima colonna, file sull'ultima riga.
