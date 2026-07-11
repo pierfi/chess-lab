@@ -17,15 +17,13 @@ Ultimo aggiornamento: **11 luglio 2026**.
 | `investigate/en-passant-move10` | ✅ **Merged in `main`** (PR #5) | Segnalazione "mossa illegale" `10. cxd6` verificata come en passant legale (non bug). Conflitto con `main` su `docs/bugs.md` risolto e pushato (merge `a6ebdba`), 21/21 test verdi. |
 | `feature/hint-engine-strength` | ✅ **Merged in `main`** (PR #6) | Forza regolabile dell'hint engine (Fable). `hint_elo` opzionale su `POST /game/{id}/hint`, default invariato (piena forza). 24/24 test verdi. |
 | `feature/persistence-db` | ✅ **Merged in `main`** (PR #7) | Fase 1 (persistenza SQLite): schema 5 tabelle, write-through cache, `think_ms`. Base per tutte le fasi successive. |
-| `feature/history-analytics-api` | 🔄 **In corso** (agente Sonnet) | Fase 2, metà "reads": stacked su `feature/persistence-db`. In lavorazione: `GET /games`, `/replay`, `DELETE`, `POST /games/import`, persistenza risultati in `/game/analyze`. Worktree: `.claude/worktrees/history-analytics-api`. **Non toccare finché l'agente non segnala fine** — poi verificare (test, no co-author trailer, working tree pulito) e proseguire con la metà Opus (stats/ELO simulato) sullo stesso branch. |
+| `feature/history-analytics-api` | ✅ Pushed, **pronto per PR** | Fase 2 completa: metà "reads" (Sonnet: `GET /games`, `/replay`, `DELETE`, `POST /games/import`, persistenza in `/game/analyze`) + metà stats/ELO simulato (Opus: `GET /stats/summary`, `GET /stats/progress`, algoritmo documentato in `docs/growth-analytics.md`). 68/68 test verdi. |
 
 ## Prossimi passi, in ordine
 
-1. Attendere fine agente Sonnet su `feature/history-analytics-api` → verificare in autonomia (pattern trust-but-verify) → push.
-2. Dispatchare un agente Opus, **stesso branch/worktree**, per la seconda metà di Fase 2: `GET /stats/summary`, `/stats/progress` (algoritmo ELO simulato), `docs/growth-analytics.md`.
-3. Una volta pronta la Fase 2 completa: Fase 3 (`feature/history-growth-ui`, frontend storico + grafici crescita) — **provare prima Fable**, priorità dichiarata dall'utente.
-4. In parallelo, l'utente apre le PR su GitHub per i branch già pronti (`fix/piece-svg-set` già mergiata; `investigate/en-passant-move10`, `feature/hint-engine-strength`, `feature/persistence-db` in attesa).
-5. Restano da avviare: Fase 4 (training backend, Opus, dipende da Fase 2), Fase 5 (training UI, dipende da Fase 3+4).
+1. L'utente apre la PR per `feature/history-analytics-api` (Fase 2 completa, pronta).
+2. Avviare Fase 3 (`feature/history-growth-ui`, frontend storico + grafici crescita, consuma gli endpoint di Fase 2) — **provare prima Fable**, priorità dichiarata dall'utente.
+3. Restano da avviare: Fase 4 (training backend, Opus, dipende da Fase 2), Fase 5 (training UI, dipende da Fase 3+4).
 
 ## Da non dimenticare
 
