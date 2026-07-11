@@ -103,6 +103,8 @@ Obiettivo: le partite sopravvivono al riavvio del server. Storico consultabile e
 
 **Stato:** la fondazione di persistenza (schema completo delle 5 tabelle + migration Alembic iniziale + wiring `games`/`moves` su `/game/new` e `/game/move` con think time reale) è **completata**. Gli endpoint di storico/replay/delete/import restano da fare in una fase successiva (vedi checklist sotto).
 
+**Nota:** l'**export** PGN (scaricare la partita corrente come `.pgn`) è stato anticipato l'11 luglio 2026, fuori roadmap — puro frontend, il backend genera già il PGN in ogni risposta di stato. Vedi [`docs/improvements.md`](docs/improvements.md). L'**import** PGN resta pianificato qui, sotto.
+
 | Settimana | Attività | Ore stimate | Modello suggerito | Stato |
 |-----------|----------|-------------|-------------------|-------|
 | Sett. 5 mag | Schema SQLite + SQLAlchemy (5 tabelle) + migration Alembic iniziale | ~3 ore | Opus | ✅ fatto |
@@ -183,7 +185,7 @@ Obiettivo: trasformare l'app in un vero trainer con feedback quantitativo sui pr
 
 | Settimana | Attività | Ore stimate | Modello suggerito |
 |-----------|----------|-------------|-------------------|
-| Sett. 9 giu | Grafico eval: curva centipawn, highlight blunders, click → jump mossa | ~3 ore | Opus |
+| Sett. 9 giu | ✅ Grafico eval: curva centipawn, highlight blunders, click → jump mossa — **anticipato, completato l'11 luglio 2026** su `feature/analysis-panel-v2` insieme al restyling a due colonne del pannello analisi (vedi [docs/improvements.md](docs/improvements.md)) | ~3 ore | Opus |
 | Sett. 16 giu | Identificazione apertura ECO live (eco.json locale, ~500 aperture) | ~2.5 ore | Sonnet |
 | Sett. 23 giu | Statistiche personali: accuracy storica, errori frequenti, ELO simulato | ~3 ore | Opus |
 | Sett. 23 giu | Dashboard riepilogo (ultimi 10 match, trend accuracy) | ~1.5 ore | Sonnet |
