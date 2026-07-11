@@ -76,3 +76,22 @@ piena forza e che a Skill 0 gli eval divergono. Aggiorna la nota di Fase 2
 **Stato:** implementato l'11 luglio 2026. Sanity check: 32 trace-test in node sulle funzioni pure estratte dal file (analisi vuota, numero dispari di semimosse, mate swing, partita senza errori, black-first, clamp del dominio), sintassi dell'intero script verificata. Verifica visiva a browser non possibile in questo ambiente (vedi nota in `bugs.md`), geometria dell'SVG verificata sui numeri.
 
 **Branch:** `feature/analysis-panel-v2`
+
+---
+
+## Scacchiera ridimensionabile (drag-to-resize)
+
+**Stato:** Da scopare/implementare — in coda dopo Fase 5 (`feature/training-ui`), per evitare conflitti di merge (entrambe toccano `frontend/index.html` e la logica di rendering board)
+**Richiesto da:** utente, 11 luglio 2026 — ispirato da un salvataggio HTML della scacchiera di analisi Lichess (`chess_app/resources_and_examples/lichass_analysis_board.html`)
+
+**Pitch:** la board attuale ha una dimensione fissa. Su Lichess la scacchiera si può ingrandire/rimpicciolire trascinando una maniglia nell'angolo, comodo su schermi grandi o per adattarsi al proprio layout preferito.
+
+**Riferimento osservato:** nell'HTML salvato, l'elemento chiave è `<cg-resize>` — la maniglia di ridimensionamento di **chessground** (la libreria board di Lichess), un piccolo handle draggable nell'angolo in basso a destra del container `<cg-board>` (`width`/`height` impostati inline in px, es. `391.111px`). Trascinandolo, chessground ricalcola le dimensioni mantenendo il rapporto 1:1 (scacchiera sempre quadrata).
+
+**Approccio proposto (da verificare in implementazione):**
+- Handle draggable (nuovo elemento, angolo in basso a destra del container board esistente), `cursor: nwse-resize`.
+- Su `mousedown` sull'handle → `mousemove` aggiorna una dimensione in px (letta da `state`, non `localStorage` — vincolo esistente, si resetta ad ogni ricarica pagina), con un min/max ragionevole (es. 320px–800px) per restare leggibile e non rompere il layout.
+- La board (CSS grid `<div>` esistente, non canvas — nessun cambio di tecnica di rendering) lega `width`/`height` del container a quella dimensione via variabile CSS o stile inline; le celle scalano proporzionalmente (già oggi presumibilmente in `%`/`fr` nel grid — da verificare, potrebbe servire un piccolo aggiustamento se sono in px fissi).
+- Nessun impatto su logica di gioco, hint, replay: è puro CSS/layout, la board resta lo stesso `buildBoardEl()` introdotto in Fase 3, solo il suo container cambia dimensione.
+
+**Nota:** puramente frontend, nessun endpoint coinvolto. Da lanciare come branch dedicato (`feature/board-resize` o simile) dopo che `feature/training-ui` è mergiata, per non toccare `frontend/index.html` in parallelo con quel lavoro.
