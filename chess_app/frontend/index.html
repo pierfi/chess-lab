@@ -334,22 +334,65 @@ body {
   font-size: 12px;
 }
 
-.analysis-move {
+/* Tabella analisi a due colonne (Bianco | Nero), una riga per numero di mossa, stile score-sheet PGN */
+.analysis-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 6px;
+  align-items: stretch;
   border-bottom: 1px solid #eee;
 }
 
+.analysis-row .row-num {
+  flex: 0 0 26px;
+  display: flex;
+  align-items: center;
+  padding: 4px 2px 4px 6px;
+  color: var(--text-dim);
+}
+
+.analysis-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px;
+}
+
+.analysis-cell + .analysis-cell { border-left: 1px solid #eee; }
+.analysis-cell .cell-san { font-weight: bold; }
+
+.analysis-cell .cp-loss {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.analysis-cell .cp-loss.mate { color: var(--red); font-weight: bold; }
+
+.analysis-cell:not(.empty) { cursor: pointer; }
+.analysis-cell:not(.empty):hover { background: rgba(0, 0, 0, 0.04); }
+
+/* Cella selezionata via click-to-jump (dalla curva eval o dalla tabella) */
+.analysis-cell.selected {
+  background: rgba(98, 153, 36, 0.14);
+  animation: cell-flash 0.9s ease;
+}
+
+@keyframes cell-flash {
+  0% { background: rgba(98, 153, 36, 0.45); }
+  100% { background: rgba(98, 153, 36, 0.14); }
+}
+
+/* Badge classificazione: simboli di annotazione scacchistica (?? ? ?! ...) per stare nella mezza colonna */
 .badge {
-  padding: 2px 8px;
-  border-radius: 10px;
+  padding: 1px 5px;
+  border-radius: 8px;
   font-size: 10px;
   font-weight: bold;
-  text-transform: uppercase;
-  min-width: 70px;
+  min-width: 20px;
   text-align: center;
+  flex-shrink: 0;
 }
 
 .badge.excellent { background: var(--green); color: #fff; }
@@ -358,18 +401,15 @@ body {
 .badge.mistake { background: var(--orange); color: #fff; }
 .badge.blunder { background: var(--red); color: #fff; }
 
-.analysis-move.expandable { cursor: pointer; }
-.analysis-move.expandable:hover { background: rgba(0, 0, 0, 0.04); }
-
 .line-chevron {
-  margin-left: auto;
   color: var(--text-dim);
   font-size: 10px;
+  flex-shrink: 0;
 }
 
 .best-line {
   display: none;
-  padding: 3px 8px 5px 44px;
+  padding: 3px 8px 5px 32px;
   font-size: 11px;
   color: var(--text-dim);
   border-bottom: 1px solid #eee;
@@ -377,6 +417,27 @@ body {
 
 .best-line.open { display: block; }
 .best-line b { font-weight: bold; }
+
+/* Grafico eval: curva centipawn (punto di vista del bianco), SVG inline senza librerie */
+.eval-chart { margin-bottom: 12px; }
+.eval-chart:empty { display: none; margin: 0; }
+
+.eval-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--surface);
+  border: 1px solid #eee;
+  border-radius: 6px;
+}
+
+.eval-chart .ec-pt { cursor: pointer; }
+.eval-chart .ec-hit { fill: transparent; pointer-events: all; }
+.eval-chart .ec-dot { opacity: 0; }
+.eval-chart .ec-pt:hover .ec-dot { opacity: 1; }
+.eval-chart .ec-ring { opacity: 0; }
+.eval-chart .ec-pt.active .ec-ring { opacity: 1; }
+.eval-chart .ec-pt.active .ec-dot { opacity: 1; }
 
 .accuracy-bar {
   text-align: center;
@@ -626,6 +687,7 @@ body {
       <h3>Analisi</h3>
       <div class="accuracy-bar" id="accuracy"></div>
       <div class="analysis-stats" id="analysis-stats"></div>
+      <div class="eval-chart" id="eval-chart"></div>
       <div class="analysis-moves" id="analysis-moves"></div>
     </div>
   </div>
@@ -689,8 +751,13 @@ let state = {
   hintLoading: false,
 };
 
+// Un solo set di glifi (quello "solid"/pieno, U+265A-265F) per entrambi i colori:
+// il set "outline" (U+2654-2659) rende come una figura sottile e vuota, che su un
+// fill CSS bianco lascia trasparente l'interno del glifo e mostra il colore della
+// casella sotto — con font di fallback inconsistenti sembra un pezzo invertito.
+// Il colore vero (bianco/nero) arriva solo da .white-piece/.black-piece in CSS.
 const PIECES = {
-  K: '♔', Q: '♕', R: '♖', B: '♗', N: '♘', P: '♙',
+  K: '♚', Q: '♛', R: '♜', B: '♝', N: '♞', P: '♟',
   k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟',
 };
 
@@ -872,13 +939,14 @@ function askPromotion(color) {
   return new Promise(resolve => {
     const box = document.getElementById('promo-box');
     const overlay = document.getElementById('promo-overlay');
-    const pieces = color === 'white'
-      ? [['♕','q'], ['♖','r'], ['♗','b'], ['♘','n']]
-      : [['♛','q'], ['♜','r'], ['♝','b'], ['♞','n']];
+    // Stesso set di glifi "solid" della board (vedi PIECES): il colore vero
+    // arriva dalla classe .white-piece/.black-piece, non dal glifo stesso.
+    const pieces = [['♛','q'], ['♜','r'], ['♝','b'], ['♞','n']];
+    const colorClass = color === 'white' ? 'white-piece' : 'black-piece';
     box.innerHTML = '';
     for (const [icon, code] of pieces) {
       const el = document.createElement('span');
-      el.className = 'promo-piece';
+      el.className = 'promo-piece ' + colorClass;
       el.textContent = icon;
       el.onclick = () => { overlay.classList.remove('visible'); resolve(code); };
       box.appendChild(el);
@@ -1456,25 +1524,145 @@ function renderAnalysis(data) {
     <div class="stat-box"><div class="stat-val" style="color:var(--yellow)">${data.inaccuracies}</div><div class="stat-label">Imprecisioni</div></div>
   `;
 
-  let movesHtml = '';
-  data.moves.forEach((m, i) => {
-    // best_line_san: presente solo per blunder/mistake; null/assente altrimenti
-    const bestLine = Array.isArray(m.best_line_san) && m.best_line_san.length > 0 ? m.best_line_san : null;
-    const lossLabel = m.is_mate_swing
-      ? '<span style="color:var(--red);font-size:11px;font-weight:bold">Matto!</span>'
-      : `<span style="color:var(--text-dim);font-size:11px">${m.loss_cp > 0 ? '-' + m.loss_cp + 'cp' : ''}</span>`;
-    movesHtml += `<div class="analysis-move${bestLine ? ' expandable' : ''}"${bestLine ? ` onclick="toggleBestLine(${i})" title="Mostra la linea migliore"` : ''}>
-      <span style="color:var(--text-dim);min-width:30px">${m.move_number}${m.color === 'white' ? '.' : '...'}</span>
-      <span style="min-width:45px;font-weight:bold">${m.move_san}</span>
-      <span class="badge ${m.classification}">${m.classification}</span>
-      ${lossLabel}
-      ${bestLine ? `<span class="line-chevron" id="line-chevron-${i}">&#9656;</span>` : ''}
-    </div>`;
-    if (bestLine) {
-      movesHtml += `<div class="best-line" id="best-line-${i}"><b>Meglio:</b> ${bestLine.join(' ')}</div>`;
-    }
+  document.getElementById('eval-chart').innerHTML = buildEvalChartSvg(data.moves);
+  document.getElementById('analysis-moves').innerHTML = buildAnalysisMovesHtml(data.moves);
+  analysisSelected = null;
+}
+
+// Simboli di annotazione scacchistica al posto delle parole intere: stanno nella mezza colonna
+const BADGE_SYMBOLS = { excellent: '!', good: '✓', inaccuracy: '?!', mistake: '?', blunder: '??' };
+
+function hasBestLine(m) {
+  // best_line_san: presente solo per blunder/mistake; null/assente altrimenti
+  return Array.isArray(m.best_line_san) && m.best_line_san.length > 0;
+}
+
+function moveRef(m) {
+  return m.move_number + (m.color === 'white' ? '.' : '…') + ' ' + m.move_san;
+}
+
+// Pure: costruisce la tabella a due colonne (Bianco | Nero) raggruppata per numero di mossa
+function buildAnalysisMovesHtml(moves) {
+  const rows = new Map();
+  moves.forEach((m, i) => {
+    if (!rows.has(m.move_number)) rows.set(m.move_number, { white: null, black: null });
+    rows.get(m.move_number)[m.color] = { m, i };
   });
-  document.getElementById('analysis-moves').innerHTML = movesHtml;
+
+  let html = '';
+  for (const [num, pair] of rows) {
+    html += `<div class="analysis-row"><span class="row-num">${num}</span>${analysisCellHtml(pair.white)}${analysisCellHtml(pair.black)}</div>`;
+    // Le best-line (chiuse di default) seguono la riga: prima quella del Bianco, poi quella del Nero
+    for (const side of ['white', 'black']) {
+      const c = pair[side];
+      if (c && hasBestLine(c.m)) {
+        html += `<div class="best-line" id="best-line-${c.i}"><b>Meglio (${moveRef(c.m)}):</b> ${c.m.best_line_san.join(' ')}</div>`;
+      }
+    }
+  }
+  return html;
+}
+
+function analysisCellHtml(entry) {
+  // Mezza mossa mancante (es. analisi a metà partita, o partita chiusa dalla mossa del Bianco)
+  if (!entry) return '<div class="analysis-cell empty"></div>';
+  const { m, i } = entry;
+  const expandable = hasBestLine(m);
+  const loss = m.is_mate_swing
+    ? '<span class="cp-loss mate">Matto!</span>'
+    : `<span class="cp-loss">${m.loss_cp > 0 ? '-' + m.loss_cp + 'cp' : ''}</span>`;
+  return `<div class="analysis-cell${expandable ? ' expandable' : ''}" id="am-cell-${i}" onclick="onAnalysisCellClick(${i})"${expandable ? ' title="Mostra la linea migliore"' : ''}>
+    <span class="cell-san">${m.move_san}</span>
+    <span class="badge ${m.classification}" title="${m.classification}">${BADGE_SYMBOLS[m.classification] || m.classification}</span>
+    ${loss}
+    ${expandable ? `<span class="line-chevron" id="line-chevron-${i}">&#9656;</span>` : ''}
+  </div>`;
+}
+
+// Pure: markup SVG della curva eval (score_cp dal punto di vista del bianco).
+// I matti sono già clampati a ±1000 dal backend (is_mate_swing) e restano appuntati al bordo del grafico.
+function buildEvalChartSvg(moves) {
+  if (!moves || moves.length === 0) return '';
+  const W = 300, H = 110, padL = 20, padR = 8, padT = 8, padB = 8;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const sc = m => m.score_cp || 0;
+  const maxAbs = Math.max(...moves.map(m => Math.abs(sc(m))));
+  // Dominio y: almeno ±300cp (per non amplificare il rumore nei pareggi piatti), massimo ±1000
+  const yMax = Math.min(1000, Math.max(300, Math.ceil(maxAbs / 100) * 100));
+  const n = moves.length;
+  const r1 = v => Math.round(v * 10) / 10;
+  const xAt = i => r1(padL + ((i + 1) / n) * plotW);
+  const yAt = cp => {
+    const c = Math.max(-yMax, Math.min(yMax, cp));
+    return r1(padT + (1 - (c / yMax + 1) / 2) * plotH);
+  };
+  const y0 = yAt(0);
+
+  // Punto di partenza virtuale a eval 0, poi un punto per ogni ply
+  const pts = [[padL, y0]].concat(moves.map((m, i) => [xAt(i), yAt(sc(m))]));
+  const linePath = pts.map((p, k) => (k === 0 ? 'M' : 'L') + p[0] + ',' + p[1]).join(' ');
+  const areaPath = linePath + ` L${pts[pts.length - 1][0]},${y0} L${padL},${y0} Z`;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Curva eval in centipawn">`;
+  // Assi recessivi: linea dello zero + etichette in pedoni
+  svg += `<line x1="${padL}" y1="${y0}" x2="${W - padR}" y2="${y0}" stroke="var(--border)" stroke-width="1"/>`;
+  svg += `<text x="2" y="${padT + 3}" font-size="8" fill="var(--text-dim)">+${yMax / 100}</text>`;
+  svg += `<text x="2" y="${y0 + 3}" font-size="8" fill="var(--text-dim)">0</text>`;
+  svg += `<text x="2" y="${H - padB + 2}" font-size="8" fill="var(--text-dim)">-${yMax / 100}</text>`;
+  svg += `<path d="${areaPath}" fill="rgba(0,0,0,0.07)" stroke="none"/>`;
+  svg += `<path d="${linePath}" fill="none" stroke="var(--accent-dark)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>`;
+
+  // Un gruppo cliccabile per ply: marker visibile solo su blunder (cerchio rosso) e mistake (rombo arancio),
+  // identità mai affidata al solo colore (forma + tooltip + riga collegata nella tabella)
+  moves.forEach((m, i) => {
+    const cx = pts[i + 1][0], cy = pts[i + 1][1];
+    const evalStr = m.is_mate_swing ? 'matto' : fmtEval(sc(m));
+    let mark = '';
+    if (m.classification === 'blunder') {
+      mark = `<circle cx="${cx}" cy="${cy}" r="3.4" fill="var(--red)" stroke="var(--card)" stroke-width="1.2"/>`;
+    } else if (m.classification === 'mistake') {
+      mark = `<rect x="${r1(cx - 2.6)}" y="${r1(cy - 2.6)}" width="5.2" height="5.2" transform="rotate(45 ${cx} ${cy})" fill="var(--orange)" stroke="var(--card)" stroke-width="1.2"/>`;
+    } else {
+      mark = `<circle class="ec-dot" cx="${cx}" cy="${cy}" r="2.4" fill="var(--text-dim)"/>`;
+    }
+    svg += `<g class="ec-pt" id="ec-pt-${i}" onclick="selectAnalysisPly(${i}, true)">`
+      + `<title>${moveRef(m)} · ${evalStr} · ${m.classification}</title>`
+      + mark
+      + `<circle class="ec-ring" cx="${cx}" cy="${cy}" r="5.5" fill="none" stroke="var(--accent-dark)" stroke-width="1.4"/>`
+      + `<circle class="ec-hit" cx="${cx}" cy="${cy}" r="8"/>`
+      + `</g>`;
+  });
+
+  svg += '</svg>';
+  return svg;
+}
+
+// ---------- Click-to-jump: curva <-> tabella ----------
+
+let analysisSelected = null;
+
+function selectAnalysisPly(i, fromChart) {
+  if (analysisSelected !== null && analysisSelected !== i) {
+    const prevCell = document.getElementById('am-cell-' + analysisSelected);
+    if (prevCell) prevCell.classList.remove('selected');
+    const prevPt = document.getElementById('ec-pt-' + analysisSelected);
+    if (prevPt) prevPt.classList.remove('active');
+  }
+  analysisSelected = i;
+  const pt = document.getElementById('ec-pt-' + i);
+  if (pt) pt.classList.add('active');
+  const cell = document.getElementById('am-cell-' + i);
+  if (cell) {
+    cell.classList.remove('selected');
+    void cell.offsetWidth;  // restart flash animation
+    cell.classList.add('selected');
+    if (fromChart) cell.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function onAnalysisCellClick(i) {
+  selectAnalysisPly(i, false);
+  toggleBestLine(i);  // no-op se la mossa non ha una best line
 }
 
 function toggleBestLine(i) {

@@ -145,7 +145,7 @@ Obiettivo: trasformare l'app in un vero trainer con feedback quantitativo sui pr
 
 | Settimana | Attività | Ore stimate | Modello suggerito |
 |-----------|----------|-------------|-------------------|
-| Sett. 9 giu | Grafico eval: curva centipawn, highlight blunders, click → jump mossa | ~3 ore | Opus |
+| Sett. 9 giu | ✅ Grafico eval: curva centipawn, highlight blunders, click → jump mossa — **anticipato, completato l'11 luglio 2026** su `feature/analysis-panel-v2` insieme al restyling a due colonne del pannello analisi (vedi [docs/improvements.md](docs/improvements.md)) | ~3 ore | Opus |
 | Sett. 16 giu | Identificazione apertura ECO live (eco.json locale, ~500 aperture) | ~2.5 ore | Sonnet |
 | Sett. 23 giu | Statistiche personali: accuracy storica, errori frequenti, ELO simulato | ~3 ore | Opus |
 | Sett. 23 giu | Dashboard riepilogo (ultimi 10 match, trend accuracy) | ~1.5 ore | Sonnet |
