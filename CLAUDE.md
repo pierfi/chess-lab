@@ -98,12 +98,12 @@ Note tecniche:
 
 ---
 
-### 🔄 Fase 3 — Persistenza & storia (backend completato, resta il frontend)
+### ✅ Fase 3 — Persistenza & storia — completata 11 luglio 2026
 **Target: inizio-metà maggio 2026 · ~2 settimane · ~8 ore**
 
 Obiettivo: le partite sopravvivono al riavvio del server. Storico consultabile e replay.
 
-**Stato:** fondazione di persistenza + **tutti gli endpoint backend di storico/replay/delete/import/analisi + le statistiche aggregate (`/stats/summary`, `/stats/progress` con ELO simulato)** sono **completati** (11 luglio 2026, branch `feature/history-analytics-api`). Resta solo il frontend (pagina storico, replay con frecce, import PGN, grafico di crescita lato UI) in una fase successiva.
+**Stato:** fondazione di persistenza + **tutti gli endpoint backend di storico/replay/delete/import/analisi + le statistiche aggregate (`/stats/summary`, `/stats/progress` con ELO simulato)** (branch `feature/history-analytics-api`) **e il frontend** (pagina Storico, replay con navigazione, import PGN, dashboard Crescita con grafici SVG) (branch `feature/history-growth-ui`) sono **completati**.
 
 **Nota (analytics anticipata):** le statistiche aggregate e l'ELO simulato erano originariamente a roadmap in Fase 5 ("Statistiche personali"); sono state anticipate qui perché leggono lo stesso storico persistito e completano la vista "storia" del backend in un colpo solo (consolidamento persistenza+analytics, vedi memoria progetto). Spec di design autoritativa in [`docs/growth-analytics.md`](docs/growth-analytics.md).
 
@@ -118,7 +118,7 @@ Obiettivo: le partite sopravvivono al riavvio del server. Storico consultabile e
 | Sett. 12 mag | Persistenza risultati `/game/analyze` → `analysis_results` (colonne già presenti) | ~1 ora | Sonnet | ✅ fatto |
 | Sett. 12 mag | Backend `POST /games/import` (parsing PGN esterno, non a roadmap in origine ma raggruppato qui perché stessa area di storico) | — | Sonnet | ✅ fatto |
 | Sett. 12 mag | Statistiche aggregate `GET /stats/summary` + `GET /stats/progress` con ELO simulato (anticipate da Fase 5 — vedi `docs/growth-analytics.md`) | ~3 ore | Opus | ✅ fatto |
-| Sett. 12 mag | Frontend: pagina storico, replay con frecce, import PGN, grafico di crescita | ~2 ore | Opus | 🔲 da fare |
+| Sett. 12 mag | Frontend: pagina storico, replay, import PGN, grafico di crescita | ~2 ore | Opus | ✅ fatto |
 
 #### Schema DB reale (implementato)
 
@@ -174,6 +174,18 @@ Tutti gli endpoint backend restanti della Fase 3 sono ora wired in `backend/main
   - `engine_elo`: sentinella `0` ("avversario sconosciuto/importato"), scelta invece di `NULL` per non alterare lo schema Fase 1 (colonna `NOT NULL`, niente nuova migration).
   - Validazione: `chess.pgn.read_game()` è tollerante — un testo non-PGN produce comunque un `Game` valido (senza `errors`) ma a **zero mosse**. La rilevazione di input spazzatura/vuoto passa quindi da "zero mosse nella mainline", non da `parsed.errors`.
   - La partita importata viene subito messa in cache (`games[game_id] = ...`), quindi è immediatamente giocabile/analizzabile senza dover attendere un round-trip di cache-miss sul DB.
+
+#### Frontend: Storico + Crescita (implementato, `frontend/index.html`)
+
+Tutto in `chess_app/frontend/index.html` (nessun file nuovo, resta single-file). Nessuna modifica al backend.
+
+- **Navigazione a tab** (`<nav class="topnav">`): Gioca / Storico / Crescita. `showView(name)` mostra/nasconde i tre contenitori (`#view-play`, `#view-history`, `#view-growth`) via `style.display`; nessun router, nessun hash URL — coerente con "nessun framework". Entrare in Storico o Crescita ricarica sempre i dati dal backend (`loadHistory()`/`loadGrowth()`), così una partita appena giocata nella vista Gioca compare subito.
+- **Renderer board condiviso**: `renderBoard()` (partita live) è stato refattorizzato per estrarre `buildBoardEl({fen, orientation, lastMove, selectedSq, legalMoves, isCheck, onSquare})`, che costruisce la griglia 8×8 pura (nessuno stato globale). Sia la partita live sia il replay chiamano questa stessa funzione — la board del replay è la stessa identica griglia, in sola lettura (`onSquare` omesso). `sqName(i)` è ora un wrapper sottile su `sqNameFor(i, orientation)`, condivisa tra i due orientamenti (quello della partita corrente e quello — `player_color` della partita replayata — dello storico).
+- **Storico** (`GET /games`): lista paginata con filtri colore/esito/sorgente (select semplici, non debounced — request-per-change è già istantanea sul dataset locale). `result` resta relativo a `player_color` esattamente come il backend (`_result_predicate`/`_player_result`): la funzione JS `playerResultOf()` è la controparte client-side della stessa convenzione, non un calcolo indipendente. Cancellazione (`DELETE /game/{id}`) dietro un modal di conferma riusato dal pattern `.modal-overlay` esistente — azione distruttiva, mai un click diretto.
+- **Replay** (`GET /game/{id}/replay`): `fens[idx]` con `moves[idx-1]` per l'etichetta "dopo quale mossa"; prev/next/start/end + click-to-jump sulla move-list + frecce tastiera (←/→/Home/End, attive solo a vista Storico aperta e replay in corso). Funziona identico su partite giocate e importate (stesso endpoint, nessuna branch nel frontend).
+- **Import PGN** (`POST /games/import`): textarea + upload file (`FileReader.readAsText`, nessun upload multipart — il contenuto testuale finisce comunque nello stesso body JSON `{pgn}`). Dopo un import riuscito il filtro sorgente passa automaticamente a "Importate" così la partita compare subito (coerente col default backend `source=play` che altrimenti la nasconderebbe).
+- **Crescita** (`GET /stats/summary` + `GET /stats/progress`): 6 stat-card headline + il blocco "ultime 10" (`recent`) + due grafici SVG inline. **Nessuna libreria di charting** (vincolo CLAUDE.md) — riusa la stessa tecnica di `buildEvalChartSvg()` già presente per l'analisi post-partita (path SVG costruito a mano, punti cliccabili con `<title>` per il tooltip nativo del browser, nessun asse doppio). Estratta in una funzione generica `buildTrendChartSvg({points, startValue, yLo, yHi, yMid, yFmt, ariaLabel, endLabel})` condivisa da ELO e accuracy — due grafici separati (non un doppio asse y, che avrebbe scale incompatibili): `buildEloChartSvg()` include un punto di partenza virtuale al seed ELO; `buildAccuracyChartSvg()` salta le partite non analizzate (`accuracy: null`) senza comprimere l'asse x — restano un "buco" alla loro posizione cronologica reale, così la spaziatura tra punti riflette il numero di partite intercorse, non il numero di partite analizzate.
+- **Verifica**: nessun browser Chromium disponibile in questo sandbox (libreria di sistema `libnspr4.so` mancante, nessun `sudo`). Verificato invece con: (1) `node --check` sull'intero blocco `<script>`; (2) un harness `jsdom` che carica il vero `index.html`, stubba solo `AudioContext`/`scrollIntoView` (assenti in jsdom, presenti in ogni browser reale) e guida `showView`, `loadHistory`, `histFiltersChanged`, `openReplay`, `replayStep/Goto`, `importPgn`, `confirmDelete`, `loadGrowth` con `fetch()` reali contro un backend live popolato da partite vere giocate via API (Stockfish 400/900/1900 ELO, una lasciata in corso, una analizzata); (3) verifica diretta via `curl` di ogni endpoint chiamato dal frontend. Tutti i controlli passano contro dati reali.
 
 ---
 
@@ -271,8 +283,8 @@ Aprile 2026
 └── Sett. 28 apr  ████  Fase 2 — eval bar + restyling Lichess-style ✅ completato
 
 Maggio 2026
-├── Sett. 5 mag   ████  Fase 3 — DB + storico  ← prossimo
-├── Sett. 12 mag  ████  Fase 3 — replay + FE storico
+├── Sett. 5 mag   ████  Fase 3 — DB + storico            ✅ completato
+├── Sett. 12 mag  ████  Fase 3 — replay + FE storico      ✅ completato
 ├── Sett. 19 mag  ████  Fase 4 — puzzle da blunder + spaced repetition  ✅ backend completato
 └── Sett. 26 mag  ████  Fase 4 — profilo debolezze + drill finali  ✅ backend completato
 
