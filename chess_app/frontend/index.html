@@ -684,8 +684,13 @@ let state = {
   hintLoading: false,
 };
 
+// Un solo set di glifi (quello "solid"/pieno, U+265A-265F) per entrambi i colori:
+// il set "outline" (U+2654-2659) rende come una figura sottile e vuota, che su un
+// fill CSS bianco lascia trasparente l'interno del glifo e mostra il colore della
+// casella sotto — con font di fallback inconsistenti sembra un pezzo invertito.
+// Il colore vero (bianco/nero) arriva solo da .white-piece/.black-piece in CSS.
 const PIECES = {
-  K: '♔', Q: '♕', R: '♖', B: '♗', N: '♘', P: '♙',
+  K: '♚', Q: '♛', R: '♜', B: '♝', N: '♞', P: '♟',
   k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟',
 };
 
@@ -867,13 +872,14 @@ function askPromotion(color) {
   return new Promise(resolve => {
     const box = document.getElementById('promo-box');
     const overlay = document.getElementById('promo-overlay');
-    const pieces = color === 'white'
-      ? [['♕','q'], ['♖','r'], ['♗','b'], ['♘','n']]
-      : [['♛','q'], ['♜','r'], ['♝','b'], ['♞','n']];
+    // Stesso set di glifi "solid" della board (vedi PIECES): il colore vero
+    // arriva dalla classe .white-piece/.black-piece, non dal glifo stesso.
+    const pieces = [['♛','q'], ['♜','r'], ['♝','b'], ['♞','n']];
+    const colorClass = color === 'white' ? 'white-piece' : 'black-piece';
     box.innerHTML = '';
     for (const [icon, code] of pieces) {
       const el = document.createElement('span');
-      el.className = 'promo-piece';
+      el.className = 'promo-piece ' + colorClass;
       el.textContent = icon;
       el.onclick = () => { overlay.classList.remove('visible'); resolve(code); };
       box.appendChild(el);
