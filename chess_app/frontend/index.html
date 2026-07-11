@@ -29,8 +29,6 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: 'Segoe UI', system-ui, sans-serif;
-  display: flex;
-  justify-content: center;
   padding: 20px;
   min-height: 100vh;
 }
@@ -40,8 +38,42 @@ body {
   gap: 24px;
   max-width: 1000px;
   width: 100%;
+  margin: 0 auto;
   align-items: flex-start;
 }
+
+/* ---------- Navigazione viste (Gioca / Storico / Crescita) ---------- */
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 1000px;
+  margin: 0 auto 18px;
+}
+
+.topnav .brand {
+  font-size: 18px;
+  font-weight: bold;
+  color: var(--accent-dark);
+  margin-right: 14px;
+  user-select: none;
+}
+
+.topnav button {
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 14px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 14px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.topnav button:hover { background: #f2f2f2; color: var(--text); }
+.topnav button.active { background: rgba(98, 153, 36, 0.14); color: var(--accent); font-weight: bold; }
+
+.view { max-width: 1000px; margin: 0 auto; }
 
 .board-area {
   display: flex;
@@ -433,9 +465,9 @@ body {
 }
 
 .eval-chart .ec-pt { cursor: pointer; }
-.eval-chart .ec-hit { fill: transparent; pointer-events: all; }
-.eval-chart .ec-dot { opacity: 0; }
-.eval-chart .ec-pt:hover .ec-dot { opacity: 1; }
+.eval-chart .ec-hit, .growth-chart .ec-hit { fill: transparent; pointer-events: all; }
+.eval-chart .ec-dot, .growth-chart .ec-dot { opacity: 0; }
+.eval-chart .ec-pt:hover .ec-dot, .growth-chart .ec-pt:hover .ec-dot { opacity: 1; }
 .eval-chart .ec-ring { opacity: 0; }
 .eval-chart .ec-pt.active .ec-ring { opacity: 1; }
 .eval-chart .ec-pt.active .ec-dot { opacity: 1; }
@@ -645,11 +677,152 @@ body {
 
 .confirm-box p { margin-bottom: 16px; }
 .confirm-box .confirm-btns { display: flex; gap: 10px; justify-content: center; }
+
+.btn-danger {
+  background: var(--red);
+  color: #fff;
+  font-weight: bold;
+  border-color: #a02020;
+}
+
+.btn-danger:hover { background: #a02020; }
+
+/* ---------- Storico (Fase 3 frontend) ---------- */
+.filter-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+
+.filter-row select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.hist-msg { color: var(--text-dim); font-size: 13px; padding: 12px 4px; }
+
+.game-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 6px;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.game-row:hover { background: var(--surface); }
+.game-row .g-date { color: var(--text-dim); flex: 0 0 78px; }
+.game-row .g-color { flex: 0 0 18px; font-size: 16px; line-height: 1; }
+.game-row .g-opp { flex: 0 0 72px; font-weight: bold; }
+.game-row .g-result { flex: 0 0 78px; font-weight: bold; }
+.game-row .res-win { color: var(--green); }
+.game-row .res-loss { color: var(--red); }
+.game-row .res-draw { color: var(--text-dim); }
+.game-row .res-open { color: var(--blue); font-weight: normal; font-style: italic; }
+.game-row .g-moves { color: var(--text-dim); flex: 0 0 70px; }
+.game-row .g-acc { margin-left: auto; color: var(--text-dim); }
+
+.game-row .g-del {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.game-row .g-del:hover { background: rgba(204, 51, 51, 0.12); color: var(--red); }
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+#import-pgn {
+  width: 100%;
+  height: 110px;
+  resize: vertical;
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.import-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+.import-msg { font-size: 12px; color: var(--text-dim); margin-top: 8px; min-height: 16px; }
+
+/* ---------- Replay ---------- */
+.replay-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 13px; }
+.replay-head #replay-title { color: var(--text-dim); }
+
+.replay-controls { display: flex; gap: 6px; margin-bottom: 10px; }
+
+.replay-controls button {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 0;
+  font-size: 15px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.replay-controls button:hover:not(:disabled) { background: #ececea; }
+.replay-controls button:disabled { opacity: 0.4; cursor: default; }
+
+.move-list .move.rp-click { cursor: pointer; }
+.move-list .move.rp-click:hover { background: rgba(0, 0, 0, 0.06); }
+.move-list .move.rp-cursor { background: rgba(98, 153, 36, 0.25); font-weight: bold; }
+
+/* ---------- Crescita (dashboard statistiche) ---------- */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.stat-box .stat-sub { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+
+.growth-charts { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 16px; }
+@media (min-width: 860px) { .growth-charts { grid-template-columns: 1fr 1fr; } }
+
+.growth-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--surface);
+  border: 1px solid #eee;
+  border-radius: 6px;
+}
+
+.growth-chart .ec-pt { cursor: default; }
+.chart-note { font-size: 11px; color: var(--text-dim); margin-top: 8px; }
 </style>
 </head>
 <body>
 
-<div class="app">
+<nav class="topnav">
+  <span class="brand">Chess Lab</span>
+  <button data-view="play" class="active" onclick="showView('play')">Gioca</button>
+  <button data-view="history" onclick="showView('history')">Storico</button>
+  <button data-view="growth" onclick="showView('growth')">Crescita</button>
+</nav>
+
+<div class="app" id="view-play">
   <div class="board-area">
     <div class="eval-bar" id="eval-bar" title="Valutazione (bianco)">
       <div class="eval-fill" id="eval-fill"></div>
@@ -700,6 +873,94 @@ body {
   </div>
 </div>
 
+<!-- Vista Storico: lista partite persistite + import PGN + replay -->
+<div class="view" id="view-history" style="display:none">
+  <div id="history-main">
+    <div class="card" style="margin-bottom:16px">
+      <h3>Storico partite</h3>
+      <div class="filter-row">
+        <select id="hist-color" onchange="histFiltersChanged()" title="Filtra per colore giocato">
+          <option value="">Colore: tutti</option>
+          <option value="white">Bianco</option>
+          <option value="black">Nero</option>
+        </select>
+        <select id="hist-result" onchange="histFiltersChanged()" title="Filtra per esito (dal punto di vista del giocatore)">
+          <option value="">Esito: tutti</option>
+          <option value="win">Vittorie</option>
+          <option value="loss">Sconfitte</option>
+          <option value="draw">Patte</option>
+        </select>
+        <select id="hist-source" onchange="histFiltersChanged()" title="Partite giocate qui oppure importate da PGN">
+          <option value="play">Giocate</option>
+          <option value="import">Importate</option>
+        </select>
+      </div>
+      <div id="history-list"></div>
+      <div class="pager" id="hist-pager" style="display:none">
+        <button class="btn" id="hist-prev" onclick="histPrev()">&larr;</button>
+        <span id="hist-page-label"></span>
+        <button class="btn" id="hist-next" onclick="histNext()">&rarr;</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Importa PGN</h3>
+      <textarea id="import-pgn" placeholder="Incolla qui il testo PGN, oppure scegli un file .pgn" spellcheck="false"></textarea>
+      <div class="import-actions">
+        <input type="file" id="import-file" accept=".pgn,.txt" onchange="importFileChosen(this)">
+        <button class="btn btn-primary" onclick="importPgn()">Importa</button>
+      </div>
+      <div class="import-msg" id="import-msg"></div>
+    </div>
+  </div>
+
+  <div id="replay-section" style="display:none">
+    <div class="app">
+      <div class="board-area">
+        <div class="board-container">
+          <div id="replay-board"></div>
+          <div class="status-bar" id="replay-status"></div>
+        </div>
+      </div>
+      <div class="sidebar">
+        <div class="card">
+          <div class="replay-head">
+            <button class="btn" onclick="closeReplay()">&larr; Storico</button>
+            <span id="replay-title"></span>
+          </div>
+          <div class="replay-controls">
+            <button id="rp-start" onclick="replayGoto(0)" title="Posizione iniziale">&#171;</button>
+            <button id="rp-prev" onclick="replayStep(-1)" title="Mossa precedente">&#8249;</button>
+            <button id="rp-next" onclick="replayStep(1)" title="Mossa successiva">&#8250;</button>
+            <button id="rp-end" onclick="replayGoto(Infinity)" title="Posizione finale">&#187;</button>
+          </div>
+          <div class="move-list" id="replay-moves"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Vista Crescita: dashboard /stats/summary + /stats/progress -->
+<div class="view" id="view-growth" style="display:none">
+  <div class="stats-grid" id="growth-cards"></div>
+  <div class="growth-charts">
+    <div class="card">
+      <h3>ELO simulato</h3>
+      <div class="growth-chart" id="elo-chart"></div>
+      <div class="chart-note">Trend direzionale (seed 1200, K=32) &mdash; non &egrave; un rating ufficiale.</div>
+    </div>
+    <div class="card">
+      <h3>Accuracy per partita</h3>
+      <div class="growth-chart" id="acc-chart"></div>
+      <div class="chart-note">Solo partite analizzate (bottone &laquo;Analizza&raquo; a fine partita).</div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Ultime 10 partite</h3>
+    <div class="stats-grid" id="recent-stats" style="margin-bottom:0"></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="setup-overlay">
   <div class="setup-box">
     <button class="modal-close" onclick="closeSetup()">&#10005;</button>
@@ -731,6 +992,16 @@ body {
     <div class="confirm-btns">
       <button class="btn" onclick="dismissConfirm()">Annulla</button>
       <button class="btn btn-primary" onclick="confirmNewGame()">Nuova partita</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="del-overlay">
+  <div class="confirm-box">
+    <p>Eliminare definitivamente questa partita?<br>Mosse e analisi verranno cancellate.</p>
+    <div class="confirm-btns">
+      <button class="btn" onclick="dismissDelete()">Annulla</button>
+      <button class="btn btn-danger" onclick="confirmDelete()">Elimina</button>
     </div>
   </div>
 </div>
@@ -813,13 +1084,19 @@ function playSound(type) {
   }
 }
 
-function sqName(i) {
+// Indice griglia (0-63) -> nome casella per un dato orientamento della board.
+// Condivisa tra la partita live (orientamento = state.playerColor) e il replay.
+function sqNameFor(i, orientation) {
   const col = i % 8;
   const row = Math.floor(i / 8);
-  if (state.playerColor === 'white') {
+  if (orientation === 'white') {
     return FILES[col] + (8 - row);
   }
   return FILES[7 - col] + (row + 1);
+}
+
+function sqName(i) {
+  return sqNameFor(i, state.playerColor);
 }
 
 // Inverse mapping of sqName: square name -> board grid center (viewBox 0..8)
@@ -970,19 +1247,19 @@ function askPromotion(color) {
   });
 }
 
-function renderBoard() {
-  const wrapper = document.getElementById('board-wrapper');
-  const pieceMap = fenToMap(state.fen);
-  wrapper.innerHTML = '';
-
-  const turnColor = state.fen.split(' ')[1] === 'w' ? 'white' : 'black';
-  const kingSq = state.isCheck ? findKing(pieceMap, turnColor) : null;
+// Renderer condiviso della board (partita live E replay): costruisce la griglia
+// 8x8 per una FEN qualsiasi. La partita live vi aggiunge selezione, mosse legali
+// e click-handler; il replay la usa in sola lettura con il proprio orientamento.
+function buildBoardEl({ fen, orientation, lastMove = null, selectedSq = null, legalMoves = [], isCheck = false, onSquare = null }) {
+  const pieceMap = fenToMap(fen);
+  const turnColor = fen.split(' ')[1] === 'w' ? 'white' : 'black';
+  const kingSq = isCheck ? findKing(pieceMap, turnColor) : null;
 
   const board = document.createElement('div');
   board.className = 'board';
 
   for (let i = 0; i < 64; i++) {
-    const sq = sqName(i);
+    const sq = sqNameFor(i, orientation);
     const col = i % 8;
     const row = Math.floor(i / 8);
     const isLight = (col + row) % 2 === 0;
@@ -991,11 +1268,11 @@ function renderBoard() {
     div.className = 'square ' + (isLight ? 'white' : 'black');
     div.dataset.sq = sq;
 
-    if (state.selectedSq === sq) div.classList.add('selected');
-    if (state.lastMove && (state.lastMove.from === sq || state.lastMove.to === sq)) div.classList.add('last-move');
+    if (selectedSq === sq) div.classList.add('selected');
+    if (lastMove && (lastMove.from === sq || lastMove.to === sq)) div.classList.add('last-move');
     if (kingSq === sq) div.classList.add('king-check');
 
-    const lm = state.legalMoves.find(m => m.to === sq);
+    const lm = legalMoves.find(m => m.to === sq);
     if (lm) {
       div.classList.add(pieceMap[sq] ? 'legal-capture' : 'legal-move');
     }
@@ -1006,7 +1283,7 @@ function renderBoard() {
     }
 
     // Coordinate stile Lichess: rank sull'ultima colonna, file sull'ultima riga.
-    // sq deriva da sqName(i), quindi le etichette seguono l'orientamento corrente.
+    // sq deriva da sqNameFor(i), quindi le etichette seguono l'orientamento corrente.
     if (col === 7) {
       const rankCoord = document.createElement('span');
       rankCoord.className = 'sq-coord rank';
@@ -1020,11 +1297,25 @@ function renderBoard() {
       div.appendChild(fileCoord);
     }
 
-    div.addEventListener('click', () => onSquareClick(sq));
+    if (onSquare) div.addEventListener('click', () => onSquare(sq));
     board.appendChild(div);
   }
 
-  wrapper.appendChild(board);
+  return board;
+}
+
+function renderBoard() {
+  const wrapper = document.getElementById('board-wrapper');
+  wrapper.innerHTML = '';
+  wrapper.appendChild(buildBoardEl({
+    fen: state.fen,
+    orientation: state.playerColor,
+    lastMove: state.lastMove,
+    selectedSq: state.selectedSq,
+    legalMoves: state.legalMoves,
+    isCheck: state.isCheck,
+    onSquare: onSquareClick,
+  }));
 
   renderArrows();
 }
@@ -1192,7 +1483,8 @@ function renderHintPanel() {
 }
 
 function renderArrows() {
-  const board = document.querySelector('.board');
+  // Scoped al wrapper della partita live: la board del replay non ha frecce hint
+  const board = document.querySelector('#board-wrapper .board');
   if (!board) return;
   const old = board.querySelector('.arrow-layer');
   if (old) old.remove();
@@ -1726,6 +2018,431 @@ function toggleBestLine(i) {
   const open = line.classList.toggle('open');
   const chevron = document.getElementById('line-chevron-' + i);
   if (chevron) chevron.innerHTML = open ? '&#9662;' : '&#9656;';
+}
+
+// ---------- Navigazione viste (Gioca / Storico / Crescita) ----------
+
+let currentView = 'play';
+
+function showView(name) {
+  currentView = name;
+  document.getElementById('view-play').style.display = name === 'play' ? 'flex' : 'none';
+  document.getElementById('view-history').style.display = name === 'history' ? 'block' : 'none';
+  document.getElementById('view-growth').style.display = name === 'growth' ? 'block' : 'none';
+  document.querySelectorAll('.topnav button[data-view]').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === name);
+  });
+  // Ogni ingresso in Storico/Crescita ricarica i dati dal backend: partite e
+  // analisi possono essere cambiate giocando nella vista Gioca nel frattempo.
+  if (name === 'history') { closeReplay(); loadHistory(); }
+  else if (name === 'growth') { loadGrowth(); }
+}
+
+// fetch con gestione errori uniforme: HTTP non-ok -> Error con il detail FastAPI
+async function fetchJson(path, opts) {
+  const r = await fetch(API + path, opts);
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.json()).detail; } catch (e) { /* body non JSON */ }
+    throw new Error(detail || ('HTTP ' + r.status));
+  }
+  return r.json();
+}
+
+function fmtDate(iso) {
+  // "2026-07-11T10:00:00" -> "11/07/2026"
+  return iso.slice(0, 10).split('-').reverse().join('/');
+}
+
+// ---------- Storico: lista partite ----------
+
+let hist = { page: 1, perPage: 10, total: 0 };
+
+const RESULT_LABEL = { win: 'Vittoria', loss: 'Sconfitta', draw: 'Patta' };
+
+// Stessa convenzione del backend (_player_result): esito relativo a player_color
+function playerResultOf(item) {
+  if (item.result === '1/2-1/2') return 'draw';
+  if (item.result === '1-0') return item.player_color === 'white' ? 'win' : 'loss';
+  if (item.result === '0-1') return item.player_color === 'black' ? 'win' : 'loss';
+  return null;   // partita in corso / esito non canonico
+}
+
+function histFiltersChanged() {
+  hist.page = 1;
+  loadHistory();
+}
+
+function histSource() {
+  return document.getElementById('hist-source').value;
+}
+
+async function loadHistory() {
+  const listEl = document.getElementById('history-list');
+  listEl.innerHTML = '<div class="hist-msg">Caricamento&hellip;</div>';
+  const q = new URLSearchParams({ page: hist.page, per_page: hist.perPage, source: histSource() });
+  const color = document.getElementById('hist-color').value;
+  const result = document.getElementById('hist-result').value;
+  if (color) q.set('color', color);
+  if (result) q.set('result', result);
+  try {
+    const data = await fetchJson('/games?' + q.toString());
+    hist.total = data.total;
+    renderHistoryList(data.items);
+  } catch (e) {
+    listEl.innerHTML = '<div class="hist-msg">Errore: backend non raggiungibile (' + e.message + ')</div>';
+    document.getElementById('hist-pager').style.display = 'none';
+  }
+}
+
+function renderHistoryList(items) {
+  const listEl = document.getElementById('history-list');
+  listEl.innerHTML = '';
+  if (items.length === 0) {
+    listEl.innerHTML = '<div class="hist-msg">Nessuna partita trovata</div>';
+  }
+  const source = histSource();
+  items.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'game-row';
+    row.title = 'Apri il replay';
+    const res = playerResultOf(item);
+    const acc = item.player_accuracy != null ? item.player_accuracy.toFixed(1) + '%' : '—';
+    const opp = source === 'import' ? 'Import' : 'SF ' + item.engine_elo;
+    row.innerHTML =
+      '<span class="g-date">' + fmtDate(item.created_at) + '</span>' +
+      '<span class="g-color" title="Colore giocato">' + (item.player_color === 'white' ? '&#9812;' : '&#9818;') + '</span>' +
+      '<span class="g-opp">' + opp + '</span>' +
+      '<span class="g-result res-' + (res || 'open') + '">' + (res ? RESULT_LABEL[res] : 'In corso') + '</span>' +
+      '<span class="g-moves">' + item.move_count + ' mosse</span>' +
+      '<span class="g-acc" title="Accuracy (se analizzata)">' + acc + '</span>';
+    const del = document.createElement('button');
+    del.className = 'g-del';
+    del.title = 'Elimina partita';
+    del.innerHTML = '&#128465;';
+    del.onclick = ev => { ev.stopPropagation(); askDeleteGame(item.game_id); };
+    row.appendChild(del);
+    row.onclick = () => openReplay(item);
+    listEl.appendChild(row);
+  });
+
+  const pages = Math.max(1, Math.ceil(hist.total / hist.perPage));
+  document.getElementById('hist-pager').style.display = 'flex';
+  document.getElementById('hist-page-label').textContent =
+    'Pagina ' + hist.page + ' di ' + pages + ' · ' + hist.total + ' partite';
+  document.getElementById('hist-prev').disabled = hist.page <= 1;
+  document.getElementById('hist-next').disabled = hist.page >= pages;
+}
+
+function histPrev() { if (hist.page > 1) { hist.page--; loadHistory(); } }
+function histNext() { hist.page++; loadHistory(); }
+
+// ---------- Storico: cancellazione (con conferma, azione distruttiva) ----------
+
+let pendingDeleteId = null;
+
+function askDeleteGame(gameId) {
+  pendingDeleteId = gameId;
+  document.getElementById('del-overlay').classList.add('visible');
+}
+
+function dismissDelete() {
+  pendingDeleteId = null;
+  document.getElementById('del-overlay').classList.remove('visible');
+}
+
+async function confirmDelete() {
+  const gameId = pendingDeleteId;
+  dismissDelete();
+  if (!gameId) return;
+  try {
+    await fetchJson('/game/' + gameId, { method: 'DELETE' });
+  } catch (e) {
+    document.getElementById('history-list').insertAdjacentHTML(
+      'afterbegin', '<div class="hist-msg">Errore eliminazione: ' + e.message + '</div>');
+    return;
+  }
+  if (replayGame && replayGame.gameId === gameId) closeReplay();
+  // Se l'ultima riga della pagina corrente è sparita, torna alla precedente
+  if (hist.page > 1 && hist.total - 1 <= (hist.page - 1) * hist.perPage) hist.page--;
+  loadHistory();
+}
+
+// ---------- Storico: import PGN ----------
+
+function importFileChosen(input) {
+  const f = input.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => { document.getElementById('import-pgn').value = reader.result; };
+  reader.readAsText(f);
+}
+
+async function importPgn() {
+  const pgn = document.getElementById('import-pgn').value.trim();
+  const msg = document.getElementById('import-msg');
+  if (!pgn) { msg.textContent = 'Incolla un PGN oppure scegli un file.'; return; }
+  msg.textContent = 'Import in corso…';
+  try {
+    const data = await fetchJson('/games/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pgn }),
+    });
+    msg.textContent = 'Partita importata (' + data.game_id + ', ' + data.move_history.length + ' mosse).';
+    document.getElementById('import-pgn').value = '';
+    document.getElementById('import-file').value = '';
+    // Gli import sono fuori dal filtro default 'play': passa al filtro
+    // "Importate" così la partita appena importata è subito visibile in lista.
+    document.getElementById('hist-source').value = 'import';
+    histFiltersChanged();
+  } catch (e) {
+    msg.textContent = 'Errore import: ' + e.message;
+  }
+}
+
+// ---------- Storico: replay ----------
+
+let replayGame = null;   // { gameId, orientation, fens, moves, idx }
+
+async function openReplay(item) {
+  let data;
+  try {
+    data = await fetchJson('/game/' + item.game_id + '/replay');
+  } catch (e) {
+    document.getElementById('history-list').insertAdjacentHTML(
+      'afterbegin', '<div class="hist-msg">Errore replay: ' + e.message + '</div>');
+    return;
+  }
+  replayGame = {
+    gameId: item.game_id,
+    orientation: item.player_color || 'white',
+    fens: data.fens,
+    moves: data.moves,
+    idx: 0,
+  };
+  const res = playerResultOf(item);
+  document.getElementById('replay-title').textContent =
+    fmtDate(item.created_at) + ' · ' +
+    (histSource() === 'import' ? 'Import' : 'vs SF ' + item.engine_elo) + ' · ' +
+    (res ? RESULT_LABEL[res] : 'In corso');
+  document.getElementById('history-main').style.display = 'none';
+  document.getElementById('replay-section').style.display = 'block';
+  renderReplay();
+}
+
+function closeReplay() {
+  replayGame = null;
+  document.getElementById('replay-section').style.display = 'none';
+  document.getElementById('history-main').style.display = '';
+}
+
+function replayGoto(idx) {
+  if (!replayGame) return;
+  replayGame.idx = Math.max(0, Math.min(replayGame.fens.length - 1, idx));
+  renderReplay();
+}
+
+function replayStep(delta) {
+  if (!replayGame) return;
+  replayGoto(replayGame.idx + delta);
+}
+
+function renderReplay() {
+  const rg = replayGame;
+  if (!rg) return;
+
+  // Board: stesso renderer della partita live, in sola lettura sulla FEN corrente
+  const wrapper = document.getElementById('replay-board');
+  wrapper.innerHTML = '';
+  const lastUci = rg.idx > 0 ? rg.moves[rg.idx - 1].uci : null;
+  wrapper.appendChild(buildBoardEl({
+    fen: rg.fens[rg.idx],
+    orientation: rg.orientation,
+    lastMove: lastUci ? { from: lastUci.slice(0, 2), to: lastUci.slice(2, 4) } : null,
+  }));
+
+  const st = document.getElementById('replay-status');
+  if (rg.idx === 0) {
+    st.textContent = rg.moves.length > 0 ? 'Posizione iniziale' : 'Partita senza mosse';
+  } else {
+    const m = rg.moves[rg.idx - 1];
+    const num = Math.ceil(m.ply / 2) + (m.ply % 2 === 1 ? '.' : '…');
+    st.textContent = 'Dopo ' + num + ' ' + m.san + ' (' + rg.idx + '/' + rg.moves.length + ')';
+  }
+
+  // Move list SAN sincronizzata: la mossa corrente è evidenziata, click -> jump
+  const el = document.getElementById('replay-moves');
+  let html = '';
+  for (let i = 0; i < rg.moves.length; i += 2) {
+    html += '<div class="move-row"><span class="move-num">' + (i / 2 + 1) + '.</span>' +
+      replayMoveSpan(i) + (rg.moves[i + 1] ? replayMoveSpan(i + 1) : '') + '</div>';
+  }
+  el.innerHTML = html;
+  const cur = el.querySelector('.rp-cursor');
+  if (cur) cur.scrollIntoView({ block: 'nearest' });
+
+  const atStart = rg.idx === 0;
+  const atEnd = rg.idx === rg.fens.length - 1;
+  document.getElementById('rp-start').disabled = atStart;
+  document.getElementById('rp-prev').disabled = atStart;
+  document.getElementById('rp-next').disabled = atEnd;
+  document.getElementById('rp-end').disabled = atEnd;
+}
+
+function replayMoveSpan(i) {
+  const cls = 'move rp-click' + (replayGame.idx === i + 1 ? ' rp-cursor' : '');
+  return '<span class="' + cls + '" onclick="replayGoto(' + (i + 1) + ')">' + replayGame.moves[i].san + '</span>';
+}
+
+// Frecce tastiera nel replay (attive solo con il replay aperto nella vista Storico)
+document.addEventListener('keydown', e => {
+  if (currentView !== 'history' || !replayGame) return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); replayStep(-1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); replayStep(1); }
+  else if (e.key === 'Home') { e.preventDefault(); replayGoto(0); }
+  else if (e.key === 'End') { e.preventDefault(); replayGoto(Infinity); }
+});
+
+// ---------- Crescita: dashboard statistiche ----------
+
+async function loadGrowth() {
+  const cardsEl = document.getElementById('growth-cards');
+  cardsEl.innerHTML = '<div class="hist-msg">Caricamento&hellip;</div>';
+  try {
+    const [summary, progress] = await Promise.all([
+      fetchJson('/stats/summary'),
+      fetchJson('/stats/progress'),
+    ]);
+    renderGrowth(summary, progress);
+  } catch (e) {
+    cardsEl.innerHTML = '<div class="hist-msg">Errore: backend non raggiungibile (' + e.message + ')</div>';
+    document.getElementById('elo-chart').innerHTML = '';
+    document.getElementById('acc-chart').innerHTML = '';
+    document.getElementById('recent-stats').innerHTML = '';
+  }
+}
+
+function statBox(val, label, sub, color) {
+  return '<div class="stat-box"><div class="stat-val"' + (color ? ' style="color:' + color + '"' : '') + '>' + val +
+    '</div><div class="stat-label">' + label + '</div>' +
+    (sub ? '<div class="stat-sub">' + sub + '</div>' : '') + '</div>';
+}
+
+function renderGrowth(sum, prog) {
+  const pct = r => Math.round(r * 100) + '%';
+  const dash = '—';
+  const dot = ' · ';
+
+  document.getElementById('growth-cards').innerHTML =
+    statBox(sum.total_games, 'Partite', sum.decided_games + ' concluse' + dot + sum.analyzed_games + ' analizzate') +
+    statBox(pct(sum.win_rate), 'Vittorie', sum.wins + 'V' + dot + sum.draws + 'P' + dot + sum.losses + 'S') +
+    statBox(sum.avg_accuracy != null ? sum.avg_accuracy + '%' : dash, 'Accuracy media', 'sulle partite analizzate') +
+    statBox(prog.current_elo, 'ELO simulato', 'picco ' + prog.peak_elo) +
+    statBox(sum.total_blunders, 'Blunder', sum.total_mistakes + ' errori' + dot + sum.total_inaccuracies + ' imprecisioni', 'var(--red)') +
+    statBox(sum.avg_think_ms_per_move != null ? (sum.avg_think_ms_per_move / 1000).toFixed(1) + 's' : dash,
+      'Tempo medio / mossa', 'mosse del giocatore');
+
+  document.getElementById('elo-chart').innerHTML = buildEloChartSvg(prog);
+  document.getElementById('acc-chart').innerHTML = buildAccuracyChartSvg(prog);
+
+  const r = prog.recent;
+  document.getElementById('recent-stats').innerHTML = r.games === 0
+    ? '<div class="hist-msg">Nessuna partita conclusa</div>'
+    : statBox((r.elo_change >= 0 ? '+' : '') + r.elo_change, 'Variazione ELO',
+        'ultime ' + r.games + ' partite', r.elo_change >= 0 ? 'var(--green)' : 'var(--red)') +
+      statBox(r.wins + '-' + r.draws + '-' + r.losses, 'V-P-S', 'esiti recenti') +
+      statBox(r.avg_accuracy != null ? r.avg_accuracy + '%' : dash, 'Accuracy recente', 'partite analizzate della finestra');
+}
+
+// Grafico di trend: stessa tecnica SVG-inline di buildEvalChartSvg, nessuna
+// libreria. Una sola serie per grafico (mai doppio asse y: ELO e accuracy hanno
+// scale diverse, quindi due grafici separati). Tooltip nativi via <title>.
+// points: [{frac (0..1], v, title}] — frac posiziona il punto sull'asse x.
+function buildTrendChartSvg({ points, startValue = null, yLo, yHi, yMid = null, yFmt, ariaLabel, endLabel = null }) {
+  const W = 560, H = 170, padL = 40, padR = 46, padT = 12, padB = 12;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const r1 = v => Math.round(v * 10) / 10;
+  const xAt = frac => r1(padL + frac * plotW);
+  const yAt = v => r1(padT + (1 - (v - yLo) / (yHi - yLo)) * plotH);
+
+  const pts = [];
+  if (startValue != null) pts.push([padL, yAt(startValue), null]);   // punto di partenza virtuale
+  points.forEach(p => pts.push([xAt(p.frac), yAt(p.v), p]));
+  const linePath = pts.map((p, k) => (k === 0 ? 'M' : 'L') + p[0] + ',' + p[1]).join(' ');
+
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + ariaLabel + '">';
+  // Griglia recessiva + etichette y
+  [yLo, yMid, yHi].forEach(v => {
+    if (v == null) return;
+    const y = yAt(v);
+    svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="var(--border)" stroke-width="1"/>';
+    svg += '<text x="2" y="' + (y + 3) + '" font-size="9" fill="var(--text-dim)">' + yFmt(v) + '</text>';
+  });
+  svg += '<path d="' + linePath + '" fill="none" stroke="var(--accent-dark)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+  // Hover per punto: dot visibile al passaggio + tooltip nativo (pattern del grafico eval)
+  pts.forEach(p => {
+    if (!p[2]) return;
+    svg += '<g class="ec-pt"><title>' + p[2].title + '</title>' +
+      '<circle class="ec-dot" cx="' + p[0] + '" cy="' + p[1] + '" r="3" fill="var(--accent-dark)"/>' +
+      '<circle class="ec-hit" cx="' + p[0] + '" cy="' + p[1] + '" r="8"/></g>';
+  });
+  // Etichetta diretta sull'ultimo valore (selettiva: solo il punto finale)
+  if (endLabel != null && pts.length > 0) {
+    const last = pts[pts.length - 1];
+    svg += '<text x="' + (last[0] + 6) + '" y="' + (last[1] + 3) + '" font-size="10" font-weight="bold" fill="var(--text)">' + endLabel + '</text>';
+  }
+  svg += '</svg>';
+  return svg;
+}
+
+function buildEloChartSvg(prog) {
+  const s = prog.series || [];
+  if (s.length === 0) return '<div class="hist-msg">Nessuna partita conclusa &mdash; gioca per vedere il trend</div>';
+  const RES_TXT = { win: 'vittoria', loss: 'sconfitta', draw: 'patta' };
+  const vals = [prog.seed_elo].concat(s.map(p => p.simulated_elo));
+  const yLo = Math.floor((Math.min.apply(null, vals) - 15) / 25) * 25;
+  const yHi = Math.ceil((Math.max.apply(null, vals) + 15) / 25) * 25;
+  const n = s.length;
+  return buildTrendChartSvg({
+    points: s.map((p, i) => ({
+      frac: (i + 1) / n,
+      v: p.simulated_elo,
+      title: '#' + p.game_number + ' · ' + fmtDate(p.date) + ' · vs SF ' + p.engine_elo +
+        ' · ' + RES_TXT[p.result] + ' · ELO ' + p.simulated_elo,
+    })),
+    startValue: prog.seed_elo,
+    yLo, yHi,
+    yMid: Math.round((yLo + yHi) / 2 / 5) * 5,
+    yFmt: v => v,
+    ariaLabel: 'Trend ELO simulato',
+    endLabel: prog.current_elo,
+  });
+}
+
+function buildAccuracyChartSvg(prog) {
+  const s = prog.series || [];
+  const n = s.length;
+  const points = [];
+  s.forEach((p, i) => {
+    // Le partite non analizzate (accuracy null) restano un buco sull'asse x,
+    // non vengono compresse: frac segue l'indice nella serie completa.
+    if (p.accuracy != null) {
+      points.push({
+        frac: (i + 1) / n,
+        v: p.accuracy,
+        title: '#' + p.game_number + ' · ' + fmtDate(p.date) + ' · accuracy ' + p.accuracy + '%',
+      });
+    }
+  });
+  if (points.length === 0) return '<div class="hist-msg">Nessuna partita analizzata &mdash; usa &laquo;Analizza&raquo; a fine partita</div>';
+  return buildTrendChartSvg({
+    points,
+    yLo: 0, yHi: 100, yMid: 50,
+    yFmt: v => v + '%',
+    ariaLabel: 'Trend accuracy per partita',
+    endLabel: points[points.length - 1].v + '%',
+  });
 }
 
 renderBoard();
