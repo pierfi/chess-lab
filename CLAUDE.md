@@ -400,7 +400,7 @@ let state = {
 - Indice `i` (0–63) → nome casella dipende da `state.playerColor`
 - Bianco: riga 0 = rank 8, col 0 = file a → `sqName(i)` restituisce es. "a8" per i=0
 - Nero: board ruotata, riga 0 = rank 1, col 0 = file h
-- Pezzi: Unicode (`♔♕♖♗♘♙` / `♚♛♜♝♞♟`)
+- Pezzi: asset SVG statici, set "Cburnett" di Lichess (`frontend/pieces/*.svg`, 12 file — vedi `pieces/NOTICE.md` per licenza/provenienza). Non più glifi Unicode: la resa a font-dipendeva dal sistema dell'utente e non garantiva colori distinguibili (`docs/bugs.md` Bug #6, fix v1/v2 insufficienti, fix v3 risolutivo l'11 luglio 2026). Mappa carattere FEN → file in `PIECE_FILES`, creazione `<img>` via `pieceImg(fenChar)`, usata da `renderBoard()` e `askPromotion()`.
 
 **CSS variables principali:**
 ```css
