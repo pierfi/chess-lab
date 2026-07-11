@@ -24,7 +24,9 @@ try:
         AnalysisResult,
         Game,
         Move,
+        Puzzle,
         SessionLocal,
+        SrsCard,
         init_db,
         session_scope,
         utcnow,
@@ -34,7 +36,9 @@ except ModuleNotFoundError:  # pragma: no cover - solo per uvicorn da backend/
         AnalysisResult,
         Game,
         Move,
+        Puzzle,
         SessionLocal,
+        SrsCard,
         init_db,
         session_scope,
         utcnow,
@@ -105,6 +109,15 @@ class HintRequest(BaseModel):
 
 class ImportPgnRequest(BaseModel):
     pgn: str
+
+class PuzzleAnswerRequest(BaseModel):
+    move_uci: str
+
+class EndgameStartRequest(BaseModel):
+    # Stessi campi di NewGameRequest tranne start_fen: quello viene dal drill
+    # scelto (path param), non dal chiamante.
+    player_color: str = Field(pattern=r"^(white|black)$")
+    engine_elo: int = Field(ge=400, le=2800)
 
 def _new_game_id() -> str:
     return uuid.uuid4().hex[:8]
@@ -273,6 +286,131 @@ def _cp_loss_to_move_accuracy(loss_cp: float) -> float:
     return max(0.0, min(100.0, accuracy))
 
 # -------------------------------------------------------------------
+# Profilo debolezze (Fase 4, GET /training/weaknesses): euristiche
+# python-chess per fase di gioco e tema tattico. Vedi docs/training-mode.md —
+# sono APPROSSIMAZIONI ("temi probabili", non un motore tattico completo, per
+# esplicita scelta di design: "Cosa NON fare in questa fase").
+# -------------------------------------------------------------------
+
+# ply <= soglia ⇒ apertura; oltre, materiale minore/maggiore residuo <= soglia
+# (esclusi pedoni e re) ⇒ finale; il resto è mediogioco.
+PHASE_OPENING_PLY_MAX = 20
+ENDGAME_MATERIAL_THRESHOLD = 13
+
+_PIECE_VALUES = {
+    chess.PAWN: 0,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+    chess.KING: 0,
+}
+
+def _classify_phase(fen_before: str, ply: int) -> str:
+    """Fase di gioco al momento della mossa (posizione PRIMA della mossa)."""
+    if ply <= PHASE_OPENING_PLY_MAX:
+        return "opening"
+    board = chess.Board(fen_before)
+    material = sum(_PIECE_VALUES[p.piece_type] for p in board.piece_map().values())
+    if material <= ENDGAME_MATERIAL_THRESHOLD:
+        return "endgame"
+    return "middlegame"
+
+def _attacked_enemy_targets(board: chess.Board, square: chess.Square, mover: chess.Color) -> int:
+    """Numero di pezzi avversari non-pedone attaccati da ``square`` (usato per
+    rilevare un fork: un pezzo che ne minaccia >= 2 dopo la mossa)."""
+    enemy = not mover
+    n = 0
+    for sq in board.attacks(square):
+        piece = board.piece_at(sq)
+        if piece is not None and piece.color == enemy and piece.piece_type != chess.PAWN:
+            n += 1
+    return n
+
+def _creates_fork(fen_before: str, move_uci: str, mover: chess.Color) -> bool:
+    """True se ``move_uci``, giocata sulla posizione ``fen_before``, porta un
+    pezzo che attacca >= 2 pezzi avversari di valore (fork)."""
+    board = chess.Board(fen_before)
+    try:
+        move = chess.Move.from_uci(move_uci)
+    except ValueError:
+        return False
+    if move not in board.legal_moves:
+        return False
+    board.push(move)
+    return _attacked_enemy_targets(board, move.to_square, mover) >= 2
+
+def _creates_pin(fen_before: str, move_uci: str, mover: chess.Color) -> bool:
+    """True se ``move_uci`` crea un NUOVO pin su un pezzo avversario (che non
+    esisteva già prima della mossa) — usa board.is_pinned() per-pezzo."""
+    board = chess.Board(fen_before)
+    try:
+        move = chess.Move.from_uci(move_uci)
+    except ValueError:
+        return False
+    if move not in board.legal_moves:
+        return False
+    enemy = not mover
+    before_pinned = {
+        sq for sq, p in board.piece_map().items()
+        if p.color == enemy and board.is_pinned(enemy, sq)
+    }
+    board.push(move)
+    after_pinned = {
+        sq for sq, p in board.piece_map().items()
+        if p.color == enemy and board.is_pinned(enemy, sq)
+    }
+    return len(after_pinned - before_pinned) > 0
+
+def _king_shield_count(board: chess.Board, color: chess.Color) -> int:
+    """Conta i pedoni propri nelle due file/ranghi davanti al re di ``color``
+    (scudo pedonale) — proxy grezzo di esposizione del re."""
+    king_sq = board.king(color)
+    if king_sq is None:
+        return 0
+    king_file = chess.square_file(king_sq)
+    king_rank = chess.square_rank(king_sq)
+    direction = 1 if color == chess.WHITE else -1
+    count = 0
+    for f in (king_file - 1, king_file, king_file + 1):
+        if f < 0 or f > 7:
+            continue
+        for r in (king_rank + direction, king_rank + 2 * direction):
+            if r < 0 or r > 7:
+                continue
+            piece = board.piece_at(chess.square(f, r))
+            if piece is not None and piece.color == color and piece.piece_type == chess.PAWN:
+                count += 1
+    return count
+
+def _exposes_king(fen_before: str, played_uci: str, best_uci: str, mover: chess.Color) -> bool:
+    """True se la mossa GIOCATA riduce lo scudo pedonale del proprio re più di
+    quanto avrebbe fatto la mossa migliore — approssimazione di "re esposto"."""
+    board = chess.Board(fen_before)
+    try:
+        played_move = chess.Move.from_uci(played_uci)
+    except ValueError:
+        return False
+    if played_move not in board.legal_moves:
+        return False
+    shield_before = _king_shield_count(board, mover)
+    played_board = board.copy()
+    played_board.push(played_move)
+    shield_played = _king_shield_count(played_board, mover)
+    if shield_played >= shield_before:
+        return False
+    try:
+        best_move = chess.Move.from_uci(best_uci)
+    except ValueError:
+        return True
+    if best_move not in board.legal_moves:
+        return True
+    best_board = board.copy()
+    best_board.push(best_move)
+    shield_best = _king_shield_count(best_board, mover)
+    return shield_played < shield_best
+
+# -------------------------------------------------------------------
 # Filtri storico condivisi tra GET /games e gli endpoint /stats/*.
 # Fonte unica di verità per la convenzione win/loss/draw (relativa a
 # player_color, NON alla stringa PGN grezza) e per i filtri di query.
@@ -361,9 +499,12 @@ def _elo_expected(player_elo: float, opponent_elo: float) -> float:
 # Persistenza (write-through cache): il DB è la fonte durevole, la cache
 # in-memory ``games`` resta l'hot path. Vedi db.py per lo schema.
 # -------------------------------------------------------------------
-def _persist_new_game(game_id: str, game: dict, created_at, first_move: dict | None) -> None:
+def _persist_new_game(
+    game_id: str, game: dict, created_at, first_move: dict | None, source: str = "play"
+) -> None:
     """Inserisce la riga games alla creazione (+ l'eventuale mossa d'apertura
-    dell'engine se il player è nero)."""
+    dell'engine se il player è nero). ``source`` distingue una partita normale
+    ('play', default) da un drill di finali ('endgame_drill', Fase 4)."""
     over = _check_game_over(game["board"])
     with session_scope() as db:
         db.add(Game(
@@ -371,7 +512,7 @@ def _persist_new_game(game_id: str, game: dict, created_at, first_move: dict | N
             player_color=game["player_color"],
             engine_elo=game["engine_elo"],
             start_fen=game.get("start_fen"),
-            source="play",
+            source=source,
             pgn=_build_pgn(game),
             created_at=created_at,
             result=over["result"] if over else None,
@@ -459,8 +600,10 @@ def _persist_analysis(
 def health():
     return {"status": "ok"}
 
-@app.post("/game/new")
-def new_game(req: NewGameRequest):
+def _create_new_game(req: NewGameRequest, source: str = "play") -> dict:
+    """Core di creazione partita, condiviso da /game/new e dal drill di finali
+    (POST /training/endgames/{id}/start, Fase 4) — stessa logica, diverso
+    ``source`` persistito e diversa provenienza di ``start_fen``."""
     game_id = _new_game_id()
 
     # Board iniziale: standard oppure da start_fen (validata qui per non far
@@ -481,9 +624,15 @@ def new_game(req: NewGameRequest):
         "start_fen": req.start_fen,
     }
 
-    # Se il player è nero, Stockfish gioca per primo (ply 1, colore bianco).
+    # Turno iniziale dedotto dalla board: bianco per la posizione standard, ma
+    # può essere nero per una start_fen custom (es. drill di finali con nero al
+    # tratto). Se non coincide col colore scelto dal player, l'engine apre la
+    # partita con quel colore — generalizza il vecchio controllo hardcoded
+    # "player_color == black ⇒ ply 1 bianco", corretto solo per la posizione
+    # standard e mai esercitato finora da uno start_fen non standard.
+    initial_turn = "white" if board.turn == chess.WHITE else "black"
     first_move = None
-    if req.player_color == "black":
+    if req.player_color != initial_turn:
         fen_before = board.fen()
         engine_m, elapsed = _engine_move(board, req.engine_elo)
         san = board.san(engine_m)  # SAN calcolata PRIMA del push
@@ -492,7 +641,7 @@ def new_game(req: NewGameRequest):
         game["last_engine_move"] = engine_m.uci()
         first_move = {
             "ply": 1,
-            "color": "white",
+            "color": initial_turn,
             "uci": engine_m.uci(),
             "san": san,
             "fen_before": fen_before,
@@ -500,11 +649,15 @@ def new_game(req: NewGameRequest):
         }
 
     games[game_id] = game
-    _persist_new_game(game_id, game, created_at, first_move)
+    _persist_new_game(game_id, game, created_at, first_move, source=source)
 
     # Marker per il think time della prossima mossa del player.
     game["last_ready_at"] = time.monotonic()
     return _board_to_state(game_id, game)
+
+@app.post("/game/new")
+def new_game(req: NewGameRequest):
+    return _create_new_game(req, source="play")
 
 @app.post("/game/move")
 def make_move(req: MoveRequest):
@@ -1132,3 +1285,360 @@ def stats_progress(
         "series": series,
         "recent": recent,
     }
+
+# =====================================================================
+# Fase 4 — Allenamento mirato (docs/training-mode.md)
+# =====================================================================
+
+def _puzzle_to_dict(puzzle: Puzzle) -> dict:
+    """Shape condivisa tra la risposta di generazione e quella di ripasso.
+    ``player_to_move`` è derivato dal campo attivo del FEN, non ricalcolato
+    altrove."""
+    player_to_move = "white" if puzzle.fen.split()[1] == "w" else "black"
+    return {
+        "puzzle_id": puzzle.id,
+        "game_id": puzzle.game_id,
+        "ply": puzzle.ply,
+        "fen": puzzle.fen,
+        "player_to_move": player_to_move,
+        "source": puzzle.source,
+    }
+
+@app.get("/training/puzzles/next")
+def next_puzzle(source: str | None = Query(default=None)):
+    """Prossima carta da ripassare (SRS, scaduta) oppure, se la coda è vuota,
+    un nuovo puzzle generato dal blunder/mistake più recente non ancora
+    trasformato in carta (fallback a inaccuracy se non ce ne sono — vedi
+    tabella rischi in docs/training-mode.md). Il puzzle prende il FEN da
+    moves.fen_before allo stesso ply (già persistito, nessuna ri-simulazione).
+
+    ``source`` è opzionale (default: nessun filtro, comportamento storico) —
+    limita la generazione di NUOVI puzzle alle partite con quel games.source.
+    Non filtra la coda di ripasso (i puzzle già generati restano ripassabili
+    a prescindere dalla partita di origine). Utile soprattutto per isolare i
+    test dallo storico condiviso, sullo stesso pattern di GET /games."""
+    now = utcnow()
+    with session_scope() as db:
+        due = db.execute(
+            select(SrsCard, Puzzle)
+            .join(Puzzle, SrsCard.puzzle_id == Puzzle.id)
+            .where(SrsCard.due_at.isnot(None), SrsCard.due_at <= now)
+            .order_by(SrsCard.due_at.asc())
+            .limit(1)
+        ).first()
+        if due is not None:
+            card, puzzle = due
+            resp = _puzzle_to_dict(puzzle)
+            resp["is_review"] = True
+            resp["due_at"] = card.due_at.isoformat()
+            return resp
+
+        # Coda vuota: genera un nuovo puzzle. Un blunder/mistake è "candidato"
+        # se non esiste già una riga puzzles per lo stesso (game_id, ply) —
+        # altrimenti rigenereremmo puzzle duplicati ad ogni chiamata.
+        row = None
+        for classes in (["blunder", "mistake"], ["inaccuracy"]):
+            already_puzzled = select(Puzzle.id).where(
+                Puzzle.game_id == AnalysisResult.game_id,
+                Puzzle.ply == AnalysisResult.ply,
+            )
+            conds = [
+                AnalysisResult.classification.in_(classes),
+                AnalysisResult.best_move_uci.isnot(None),
+                Move.color == Game.player_color,
+                ~already_puzzled.exists(),
+            ]
+            if source is not None:
+                conds.append(Game.source == source)
+            stmt = (
+                select(AnalysisResult, Move.fen_before)
+                .join(
+                    Move,
+                    and_(AnalysisResult.game_id == Move.game_id, AnalysisResult.ply == Move.ply),
+                )
+                .join(Game, AnalysisResult.game_id == Game.id)
+                .where(*conds)
+                .order_by(Game.created_at.desc(), AnalysisResult.ply.desc())
+                .limit(1)
+            )
+            result = db.execute(stmt).first()
+            if result is not None:
+                row = result
+                break
+
+        if row is None:
+            return {
+                "puzzle_id": None,
+                "message": "Nessuna carta in scadenza e nessun blunder/mistake nuovo da trasformare in puzzle.",
+            }
+
+        analysis_row, fen_before = row
+        puzzle = Puzzle(
+            game_id=analysis_row.game_id,
+            ply=analysis_row.ply,
+            fen=fen_before,
+            best_move_uci=analysis_row.best_move_uci,
+            source=analysis_row.classification,
+        )
+        db.add(puzzle)
+        db.flush()  # popola puzzle.id senza attendere il commit di uscita
+        resp = _puzzle_to_dict(puzzle)
+        resp["is_review"] = False
+        resp["due_at"] = None
+        return resp
+
+@app.post("/training/puzzles/{puzzle_id}/answer")
+def answer_puzzle(puzzle_id: int, req: PuzzleAnswerRequest):
+    """Valida move_uci contro best_move_uci (match esatto, nessuna tolleranza
+    cp — puzzle a soluzione unica) e aggiorna lo scheduling SM-2 semplificato
+    (docs/training-mode.md). La carta SRS nasce qui al primo tentativo, non
+    alla generazione del puzzle."""
+    now = utcnow()
+    with session_scope() as db:
+        puzzle = db.get(Puzzle, puzzle_id)
+        if puzzle is None:
+            raise HTTPException(status_code=404, detail="Puzzle not found")
+
+        card = db.execute(
+            select(SrsCard).where(SrsCard.puzzle_id == puzzle_id)
+        ).scalar_one_or_none()
+        if card is None:
+            # Valori espliciti (non i default di colonna, applicati solo
+            # all'INSERT): servono subito qui perché li aggiorniamo prima del
+            # flush/commit di fine sessione.
+            card = SrsCard(puzzle_id=puzzle_id, ease_factor=2.5, correct_streak=0)
+            db.add(card)
+
+        correct = req.move_uci.strip().lower() == puzzle.best_move_uci.lower()
+
+        if correct:
+            card.correct_streak += 1
+            if card.correct_streak == 1:
+                card.interval_days = 1
+            elif card.correct_streak == 2:
+                card.interval_days = 3
+            else:
+                card.interval_days = round((card.interval_days or 1) * card.ease_factor)
+            card.ease_factor = min(card.ease_factor + 0.1, 3.0)
+        else:
+            card.correct_streak = 0
+            card.interval_days = 1
+            card.ease_factor = max(card.ease_factor - 0.2, 1.3)
+
+        card.due_at = now + timedelta(days=card.interval_days)
+        card.last_reviewed_at = now
+
+        result = {
+            "correct": correct,
+            "best_move_uci": puzzle.best_move_uci,
+            "next_due_at": card.due_at.isoformat(),
+            "interval_days": card.interval_days,
+            "ease_factor": round(card.ease_factor, 2),
+            "correct_streak": card.correct_streak,
+        }
+
+    return result
+
+@app.get("/training/weaknesses")
+def training_weaknesses(source: str | None = Query(default=None)):
+    """Aggregazione errori del PLAYER (non dell'engine) per fase di gioco e
+    tema tattico probabile. Euristiche approssimate (python-chess, nessun
+    motore tattico dedicato) — vedi docs/training-mode.md: da presentare come
+    suggerimento, non come diagnosi certa. ``source`` default 'play', stessa
+    convenzione di GET /games e /stats/*."""
+    src = source if source is not None else "play"
+
+    with session_scope() as db:
+        rows = db.execute(
+            select(AnalysisResult, Move.fen_before, Move.uci, Move.color)
+            .join(
+                Move,
+                and_(AnalysisResult.game_id == Move.game_id, AnalysisResult.ply == Move.ply),
+            )
+            .join(Game, AnalysisResult.game_id == Game.id)
+            .where(Game.source == src, Move.color == Game.player_color)
+        ).all()
+
+    phase_stats = {p: {"total_loss": 0.0, "count": 0} for p in ("opening", "middlegame", "endgame")}
+    theme_counts = {"fork": 0, "pin": 0, "king_safety": 0}
+
+    for ar, fen_before, move_uci, color in rows:
+        mover = chess.WHITE if color == "white" else chess.BLACK
+
+        phase = _classify_phase(fen_before, ar.ply)
+        phase_stats[phase]["total_loss"] += ar.loss_cp
+        phase_stats[phase]["count"] += 1
+
+        if ar.classification in ("blunder", "mistake") and ar.best_move_uci:
+            if _creates_fork(fen_before, ar.best_move_uci, mover) and not _creates_fork(
+                fen_before, move_uci, mover
+            ):
+                theme_counts["fork"] += 1
+            if _creates_pin(fen_before, ar.best_move_uci, mover) and not _creates_pin(
+                fen_before, move_uci, mover
+            ):
+                theme_counts["pin"] += 1
+            if _exposes_king(fen_before, move_uci, ar.best_move_uci, mover):
+                theme_counts["king_safety"] += 1
+
+    by_phase = {
+        phase: {
+            "avg_loss_cp": round(stats["total_loss"] / stats["count"], 1) if stats["count"] else None,
+            "count": stats["count"],
+        }
+        for phase, stats in phase_stats.items()
+    }
+    by_theme = {theme: {"missed_count": n} for theme, n in theme_counts.items()}
+
+    return {
+        "by_phase": by_phase,
+        "by_theme": by_theme,
+        "note": "Euristiche approssimate su python-chess: temi probabili, non diagnosi certa.",
+    }
+
+# -------------------------------------------------------------------
+# Drill di finali teorici (set statico, ~15-20 posizioni canoniche). Ogni
+# voce: fen, goal ("win"|"draw"), description breve. Stockfish a piena forza
+# funge da "tablebase" didattica sufficiente (vedi docs/training-mode.md).
+# -------------------------------------------------------------------
+ENDGAME_DRILLS: list[dict] = [
+    {
+        "id": "kq_vs_k",
+        "name": "Re e Donna contro Re",
+        "fen": "4k3/8/8/8/8/8/8/3QK3 w - - 0 1",
+        "goal": "win",
+        "description": "Scaccomatto elementare: guida il re avversario sul bordo con la donna.",
+    },
+    {
+        "id": "kr_vs_k",
+        "name": "Re e Torre contro Re",
+        "fen": "4k3/8/8/8/8/8/8/R3K3 w - - 0 1",
+        "goal": "win",
+        "description": "Scaccomatto elementare con la tecnica della scala (torre + re).",
+    },
+    {
+        "id": "k2r_vs_k",
+        "name": "Re e due Torri contro Re",
+        "fen": "4k3/8/8/8/8/8/8/R3K2R w - - 0 1",
+        "goal": "win",
+        "description": "Matto della scala con due torri: il più semplice dei finali di matto.",
+    },
+    {
+        "id": "two_bishops_vs_k",
+        "name": "Due Alfieri contro Re",
+        "fen": "4k3/8/8/8/8/8/8/2B1KB2 w - - 0 1",
+        "goal": "win",
+        "description": "Matto con due alfieri: tecnica della gabbia diagonale, più delicata del matto con torre.",
+    },
+    {
+        "id": "bn_vs_k",
+        "name": "Alfiere e Cavallo contro Re (avanzato)",
+        "fen": "4k3/8/8/8/8/8/8/2BNK3 w - - 0 1",
+        "goal": "win",
+        "description": "Il finale di matto più difficile tra i 4 elementari: matto forzato in un angolo del colore dell'alfiere.",
+    },
+    {
+        "id": "kp_opposition_win",
+        "name": "Opposizione Re e Pedone (vincente)",
+        "fen": "8/8/4k3/8/4P3/4K3/8/8 w - - 0 1",
+        "goal": "win",
+        "description": "Il re bianco ha già l'opposizione: il pedone promuove con la tecnica corretta.",
+    },
+    {
+        "id": "kp_draw",
+        "name": "Opposizione Re e Pedone (patta)",
+        "fen": "8/8/8/8/8/4k3/4p3/4K3 b - - 0 1",
+        "goal": "draw",
+        "description": "Il re difensore ha l'opposizione: il pedone non passa, la posizione è patta con gioco corretto.",
+    },
+    {
+        "id": "lucena",
+        "name": "Posizione di Lucena",
+        "fen": "1K1k4/1P6/8/8/8/8/r7/5R2 w - - 0 1",
+        "goal": "win",
+        "description": "Il finale di torre più famoso: la tecnica del 'ponte' costruisce un riparo per il re e vince.",
+    },
+    {
+        "id": "philidor",
+        "name": "Posizione di Philidor",
+        "fen": "8/8/8/3k4/8/3K4/3P4/3r4 b - - 0 1",
+        "goal": "draw",
+        "description": "Difesa sulla sesta traversa: il lato debole tiene la patta tenendo la torre sulla riga davanti al pedone.",
+    },
+    {
+        "id": "q_vs_p_7th",
+        "name": "Donna contro pedone in settima",
+        "fen": "8/8/8/8/8/2k5/1p6/1K1Q4 w - - 0 1",
+        "goal": "win",
+        "description": "La donna da sola batte un pedone avanzato (non di torre/alfiere) prossimo alla promozione.",
+    },
+    {
+        "id": "r_vs_b_draw",
+        "name": "Torre contro Alfiere (patta)",
+        "fen": "8/8/8/4k3/8/4b3/8/R3K3 w - - 0 1",
+        "goal": "draw",
+        "description": "Materiale spaiato classico: il lato debole tiene la patta con difesa corretta.",
+    },
+    {
+        "id": "r_vs_n_draw",
+        "name": "Torre contro Cavallo (patta)",
+        "fen": "8/8/8/4k3/8/4n3/8/R3K3 w - - 0 1",
+        "goal": "draw",
+        "description": "Come torre-vs-alfiere: patta teorica se il cavallo resta vicino al proprio re.",
+    },
+    {
+        "id": "outside_passed",
+        "name": "Pedone passato lontano",
+        "fen": "8/8/1p6/1P6/8/2k5/6P1/2K5 w - - 0 1",
+        "goal": "win",
+        "description": "Il pedone passato sull'ala opposta distrae il re avversario: il pedone di riserva decide.",
+    },
+    {
+        "id": "q_vs_r",
+        "name": "Donna contro Torre",
+        "fen": "8/8/8/4k3/8/8/4r3/3QK3 w - - 0 1",
+        "goal": "win",
+        "description": "Finale tecnico classico: la donna vince contro la torre isolata con la tecnica corretta.",
+    },
+    {
+        "id": "trebuchet",
+        "name": "Trébuchet (zugzwang reciproco)",
+        "fen": "8/8/3k4/3p4/3P4/3K4/8/8 w - - 0 1",
+        "goal": "draw",
+        "description": "Pedoni bloccati, re a contatto: chi deve muovere perde l'opposizione — qui è patta.",
+    },
+    {
+        "id": "rook_pawn_win",
+        "name": "Torre contro Re, pedone di torre",
+        "fen": "8/6k1/8/8/8/8/R5K1/8 w - - 0 1",
+        "goal": "win",
+        "description": "Variante del matto elementare con re avversario già spinto verso il bordo lungo.",
+    },
+]
+
+_ENDGAME_DRILLS_BY_ID = {d["id"]: d for d in ENDGAME_DRILLS}
+
+@app.get("/training/endgames")
+def list_endgames():
+    """Lista statica dei drill di finali teorici disponibili."""
+    return {"endgames": ENDGAME_DRILLS}
+
+@app.post("/training/endgames/{endgame_id}/start")
+def start_endgame(endgame_id: str, req: EndgameStartRequest):
+    """Avvia una partita da un FEN custom (drill di finali) — estende
+    POST /game/new con start_fen preso dal drill selezionato (non dal
+    chiamante). Riusa _create_new_game così mosse/game-over/PGN restano
+    l'infrastruttura esistente, nessuna duplicazione."""
+    drill = _ENDGAME_DRILLS_BY_ID.get(endgame_id)
+    if drill is None:
+        raise HTTPException(status_code=404, detail="Endgame drill not found")
+
+    new_req = NewGameRequest(
+        player_color=req.player_color,
+        engine_elo=req.engine_elo,
+        start_fen=drill["fen"],
+    )
+    state = _create_new_game(new_req, source="endgame_drill")
+    state["endgame_id"] = endgame_id
+    state["goal"] = drill["goal"]
+    return state

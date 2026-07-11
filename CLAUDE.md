@@ -189,24 +189,38 @@ Tutto in `chess_app/frontend/index.html` (nessun file nuovo, resta single-file).
 
 ---
 
-### 🔲 Fase 4 — Allenamento mirato: errori, ripasso e finali
+### 🔄 Fase 4 — Allenamento mirato: errori, ripasso e finali (backend completato, resta il frontend)
 **Target: metà-fine maggio 2026 · ~3 settimane · ~14 ore**
 
 Obiettivo: trasformare gli errori giocati in materiale di allenamento reale, non solo in statistiche a consuntivo. Puzzle generati dai propri blunder, ripasso a intervalli (spaced repetition), diagnosi delle debolezze per fase di gioco e tema tattico, drill di finali teorici. Dipende dalla persistenza di Fase 3 (`analysis_results`). Analisi di design completa in [`docs/training-mode.md`](docs/training-mode.md).
 
-| Settimana | Attività | Ore stimate | Modello suggerito |
-|-----------|----------|-------------|-------------------|
-| Sett. 19 mag | Schema `puzzles` + `srs_cards`; generazione puzzle da `analysis_results` (ogni mossa con `classification` blunder/mistake diventa un puzzle: FEN prima dell'errore + `best_move_uci`) | ~3 ore | Opus |
-| Sett. 19 mag | `GET /training/puzzles/next`, `POST /training/puzzles/{id}/answer` con scheduling SM-2 semplificato | ~3 ore | Opus |
-| Sett. 26 mag | `GET /training/weaknesses` — aggregazione errori per fase (apertura/mediogioco/finale) e tema tattico (fork/pin/re esposto) da `analysis_results` | ~3 ore | Opus |
-| Sett. 26 mag | Drill finali teorici: `GET /training/endgames` (lista statica ~15-20 FEN canonici), `POST /training/endgames/{id}/start` (estende `POST /game/new` con `start_fen` opzionale) | ~2 ore | Sonnet |
-| Sett. 2 giu | Frontend: pannello "Allenamento" — risoluzione puzzle, dashboard debolezze, selezione drill finali | ~3 ore | Opus |
+**Stato:** tutti gli endpoint backend (puzzle da blunder + SRS, profilo debolezze, drill di finali) sono **completati** (11 luglio 2026, branch `feature/training-backend`, 25 nuovi test — 93/93 nella suite). Resta solo il frontend (pannello "Allenamento": risoluzione puzzle, dashboard debolezze, selezione drill finali).
 
-Tabelle DB (in aggiunta a quelle di Fase 3):
-- `puzzles` — id, game_id, ply, fen, best_move_uci, source (`blunder`\|`mistake`), created_at
+| Settimana | Attività | Ore stimate | Modello suggerito | Stato |
+|-----------|----------|-------------|-------------------|-------|
+| Sett. 19 mag | Schema `puzzles` + `srs_cards`; generazione puzzle da `analysis_results` (ogni mossa con `classification` blunder/mistake diventa un puzzle: FEN prima dell'errore + `best_move_uci`) | ~3 ore | Opus | ✅ fatto (schema già presente da Fase 3, nessuna migration servita) |
+| Sett. 19 mag | `GET /training/puzzles/next`, `POST /training/puzzles/{id}/answer` con scheduling SM-2 semplificato | ~3 ore | Opus | ✅ fatto |
+| Sett. 26 mag | `GET /training/weaknesses` — aggregazione errori per fase (apertura/mediogioco/finale) e tema tattico (fork/pin/re esposto) da `analysis_results` | ~3 ore | Opus | ✅ fatto |
+| Sett. 26 mag | Drill finali teorici: `GET /training/endgames` (lista statica ~15-20 FEN canonici), `POST /training/endgames/{id}/start` (estende `POST /game/new` con `start_fen` opzionale) | ~2 ore | Sonnet | ✅ fatto |
+| Sett. 2 giu | Frontend: pannello "Allenamento" — risoluzione puzzle, dashboard debolezze, selezione drill finali | ~3 ore | Opus | 🔲 da fare |
+
+Tabelle DB (già presenti a schema da Fase 3, nessuna migration nuova):
+- `puzzles` — id, game_id, ply, fen, best_move_uci, source (`blunder`\|`mistake`\|`inaccuracy` — vedi nota fallback sotto), created_at
 - `srs_cards` — id, puzzle_id, due_at, interval_days, ease_factor, correct_streak, last_reviewed_at
 
 **Nota:** questi puzzle nascono dalle proprie partite (self-generated) — concettualmente distinti dalla "Modalità puzzle" di Fase 6 (dataset Lichess esterno, FEN generiche). Le due funzionalità convivono, non si sovrappongono.
+
+#### Dettagli implementazione non ovvi (11 luglio 2026)
+
+- **Schema già pronto, zero migration.** Le tabelle `puzzles`/`srs_cards` create in Fase 3 corrispondevano già esattamente allo schema di `docs/training-mode.md` (colonne, unique constraint, FK CASCADE) — questa fase ha solo scritto la logica applicativa, nessun `alembic revision` servito.
+- **`source` esteso a `inaccuracy`.** Lo schema non ha un vero `CHECK` a runtime (solo `String(16)`), quindi il fallback esplicitamente previsto dalla spec ("pochi blunder registrati → includere anche `inaccuracy`") è stato implementato senza toccare lo schema: `puzzles.source` può valere `blunder`\|`mistake`\|`inaccuracy`.
+- **`GET /training/puzzles/next` — priorità e filtro opzionale `source`.** Ordine: (1) prima carta SRS scaduta (`due_at <= now`, qualunque sia la partita di origine); (2) se nessuna è scaduta, il blunder/mistake più recente (per `games.created_at`, poi `ply`) senza già una riga `puzzles` per lo stesso `(game_id, ply)`; (3) fallback a `inaccuracy` solo se (2) non trova nulla. Il parametro opzionale `?source=` (default: nessun filtro, comportamento invariato) limita la **generazione di nuovi** puzzle a un `games.source` specifico — non filtra la coda di ripasso. Aggiunto per coerenza con `GET /games`/`/stats/*` e per isolare i test dallo storico condiviso, non richiesto dalla spec originale.
+- **SM-2: la carta nasce al primo tentativo**, non alla generazione del puzzle (`SrsCard` creata dentro `POST /training/puzzles/{id}/answer`, non da `/next`) — un puzzle mai risposto non è "in coda di ripasso", come da spec. Match `move_uci` vs `best_move_uci` case-insensitive, nessuna tolleranza in centipawn (puzzle a soluzione unica).
+- **`GET /training/weaknesses` — solo errori del PLAYER.** Join `analysis_results` → `moves` (stesso `game_id`+`ply`, per leggere `moves.color`) → `games`, filtrato su `moves.color == games.player_color`: un blunder dell'engine non entra nell'aggregazione. `source` di default `'play'`, stessa convenzione di `GET /games`.
+  - **Fase di gioco**: `ply <= 20` → apertura; altrimenti materiale residuo (donna=9, torre=5, alfiere/cavallo=3, pedoni/re esclusi) `<= 13` → finale; il resto è mediogioco.
+  - **Temi tattici**: euristiche `python-chess` **approssimate** (esplicitamente NON un motore tattico, per scelta di design) — fork = la mossa migliore porta un pezzo che attacca ≥2 pezzi avversari non-pedone e la mossa giocata no; pin = la mossa migliore crea un `is_pinned()` nuovo su un pezzo avversario che la mossa giocata non crea; re esposto = la mossa giocata riduce lo scudo pedonale del proprio re (pedoni propri nelle 2 file/ranghi davanti al re) più di quanto avrebbe fatto la mossa migliore. Solo righe `blunder`/`mistake` contribuiscono ai temi (non `inaccuracy`/`good`). La risposta include un campo `"note"` che ricorda esplicitamente la natura euristica ("temi probabili", non diagnosi certa), come richiesto dalla spec.
+- **Drill di finali — fix di un bug latente in `_create_new_game`.** La vecchia logica di `/game/new` decideva la prima mossa dell'engine con `if player_color == "black"` hardcoded, assumendo sempre bianco al tratto all'inizio (vero solo per la posizione standard, mai esercitato da uno `start_fen` custom fino ad ora). Il drill "Philidor" parte col **nero** al tratto: `_create_new_game` ora deduce il turno iniziale da `board.turn` e fa aprire l'engine solo se non coincide col colore scelto dal player — generalizza il comportamento esistente (per la posizione standard è un no-op, verificato dai test Fase 3 già passanti) e lo rende corretto anche per FEN custom. `POST /training/endgames/{id}/start` riusa `_create_new_game(..., source="endgame_drill")`, nessuna duplicazione con `/game/new`.
+- **16 posizioni** nel set statico (`ENDGAME_DRILLS` in `main.py`): matti elementari (KQvK, KRvK, K2RvK, due alfieri vK, alfiere+cavallo vK), K+P (opposizione vincente e patta, pedone passato lontano, trébuchet), finali di torre (Lucena, Philidor, torre vs alfiere/cavallo, pedone di torre), donna vs pedone in settima, donna vs torre. Stockfish a piena forza (già usato altrove nell'app) funge da "tablebase" didattica, coerente con la scelta di design della spec.
 
 ---
 
@@ -271,11 +285,11 @@ Aprile 2026
 Maggio 2026
 ├── Sett. 5 mag   ████  Fase 3 — DB + storico            ✅ completato
 ├── Sett. 12 mag  ████  Fase 3 — replay + FE storico      ✅ completato
-├── Sett. 19 mag  ████  Fase 4 — puzzle da blunder + spaced repetition  ← prossimo
-└── Sett. 26 mag  ████  Fase 4 — profilo debolezze + drill finali
+├── Sett. 19 mag  ████  Fase 4 — puzzle da blunder + spaced repetition  ✅ backend completato
+└── Sett. 26 mag  ████  Fase 4 — profilo debolezze + drill finali  ✅ backend completato
 
 Giugno 2026
-├── Sett. 2 giu   ████  Fase 4 — frontend pannello Allenamento
+├── Sett. 2 giu   ████  Fase 4 — frontend pannello Allenamento  ← prossimo (frontend)
 ├── Sett. 9 giu   ████  Fase 5 — eval chart
 ├── Sett. 16 giu  ████  Fase 5 — aperture ECO
 └── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard
@@ -521,29 +535,106 @@ Response: {
 }
 ```
 
-### Endpoint da implementare in Fase 4 (Allenamento mirato)
+### Endpoint Fase 4 (Allenamento mirato) — implementati
 
 ```python
-# Prossimo puzzle da ripassare (SRS) o generato da un blunder/mistake recente
-GET /training/puzzles/next
-# → {"puzzle_id": ..., "fen": "...", "player_to_move": "white"|"black", "source": "blunder"|"mistake"}
+# Prossima carta SRS scaduta, o un nuovo puzzle generato dal blunder/mistake
+# più recente non ancora trasformato in carta (fallback a inaccuracy se non
+# ce ne sono). `source` opzionale (default: nessun filtro) limita la
+# GENERAZIONE di nuovi puzzle a un games.source specifico — non filtra la
+# coda di ripasso, che resta a prescindere dalla partita di origine.
+GET /training/puzzles/next?source=play
+Response (puzzle disponibile): {
+  "puzzle_id": 12,
+  "game_id": "6f0610a7",
+  "ply": 14,
+  "fen": "r1bqkbnr/...",
+  "player_to_move": "white" | "black",
+  "source": "blunder" | "mistake" | "inaccuracy",
+  "is_review": false,        # true se viene dalla coda SRS scaduta
+  "due_at": null | "2026-07-20T10:00:00"   # solo se is_review=true
+}
+Response (nessuna carta scaduta e nessun candidato nuovo): {
+  "puzzle_id": null,
+  "message": "Nessuna carta in scadenza e nessun blunder/mistake nuovo da trasformare in puzzle."
+}
 
-# Risposta al puzzle: valida la mossa, aggiorna lo scheduling SM-2
+# Risposta al puzzle: match esatto (case-insensitive) su move_uci vs
+# best_move_uci, nessuna tolleranza cp. La carta SRS nasce qui al PRIMO
+# tentativo (non alla generazione). Scheduling SM-2 semplificato — vedi
+# l'algoritmo esatto in docs/training-mode.md.
 POST /training/puzzles/{puzzle_id}/answer
 Body: { "move_uci": "e2e4" }
-Response: { "correct": true, "best_move_uci": "e2e4", "next_due_at": "2026-05-24" }
+Response: {
+  "correct": true,
+  "best_move_uci": "e2e4",
+  "next_due_at": "2026-07-20T10:00:00",
+  "interval_days": 3,
+  "ease_factor": 2.7,
+  "correct_streak": 2
+}
+# 404 se puzzle_id non esiste.
 
-# Diagnosi debolezze: errori aggregati per fase di gioco e tema tattico
-GET /training/weaknesses
-# → {"by_phase": {"opening": {...}, "middlegame": {...}, "endgame": {...}},
-#     "by_theme": {"fork": {...}, "pin": {...}, "king_safety": {...}}}
+# Diagnosi debolezze: errori del PLAYER (non dell'engine) aggregati per fase
+# di gioco (ply<=20 apertura; altrimenti materiale residuo<=13 → finale;
+# resto → mediogioco) e tema tattico probabile (solo righe blunder/mistake).
+# Euristiche python-chess approssimate, non un motore tattico — "note" lo
+# ricorda esplicitamente. source default 'play', stessa convenzione di
+# GET /games.
+GET /training/weaknesses?source=play
+Response: {
+  "by_phase": {
+    "opening":    {"avg_loss_cp": 12.3, "count": 45},
+    "middlegame": {"avg_loss_cp": 34.1, "count": 120},
+    "endgame":    {"avg_loss_cp": 58.7, "count": 30}
+  },
+  "by_theme": {
+    "fork":        {"missed_count": 8},
+    "pin":         {"missed_count": 5},
+    "king_safety": {"missed_count": 12}
+  },
+  "note": "Euristiche approssimate su python-chess: temi probabili, non diagnosi certa."
+}
 
-# Lista drill di finali teorici (FEN statici)
+# Lista statica dei drill di finali teorici (16 posizioni canoniche).
 GET /training/endgames
+Response: {
+  "endgames": [
+    {
+      "id": "kr_vs_k",
+      "name": "Re e Torre contro Re",
+      "fen": "4k3/8/8/8/8/8/8/R3K3 w - - 0 1",
+      "goal": "win" | "draw",
+      "description": "Scaccomatto elementare con la tecnica della scala (torre + re)."
+    }
+  ]
+}
 
-# Avvia una partita da un FEN custom (drill finale)
-POST /training/endgames/{id}/start
-# → riusa POST /game/new estendendolo con `start_fen` opzionale
+# Avvia una partita dal FEN del drill scelto — riusa la stessa logica di
+# creazione di POST /game/new (_create_new_game), fissando source a
+# 'endgame_drill'. 404 se l'id non esiste. Se il colore scelto dal player non
+# coincide col colore al tratto sul FEN del drill, l'engine apre la partita
+# (stesso comportamento generalizzato di /game/new, non solo per la
+# posizione standard).
+POST /training/endgames/{endgame_id}/start
+Body: { "player_color": "white"|"black", "engine_elo": 800 }
+Response:  # stesso shape di board_to_state (GET /game/{id}) + endgame_id/goal
+{
+  "game_id": "a1b2c3d4",
+  "fen": "4k3/8/8/8/8/8/8/R3K3 w - - 0 1",
+  "pgn": "...",
+  "turn": "white",
+  "is_check": false,
+  "is_game_over": false,
+  "result": null,
+  "last_engine_move": null,
+  "move_history": [],
+  "move_history_san": [],
+  "player_color": "white",
+  "engine_elo": 800,
+  "endgame_id": "kr_vs_k",
+  "goal": "win"
+}
 ```
 
 Analisi di design completa (algoritmo SM-2, classificazione fase/tema, formato guida utente): [`docs/training-mode.md`](docs/training-mode.md).
