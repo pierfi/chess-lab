@@ -68,7 +68,7 @@ La risposta include un campo `game_over` con `result` (es. `"1/2-1/2"`) e `reaso
 
 **File:** `frontend/index.html` → CSS `.square`, `.promo-piece`
 **Priorità:** Media
-**Stato:** Fix applicato, da confermare visivamente (non è stato possibile verificare a schermo in questo ambiente, vedi nota sotto)
+**Stato:** **Chiuso — confermato visivamente dall'utente l'11 luglio 2026** (fix v3, asset SVG)
 
 **Problema:** L'utente riporta che sulla scacchiera i pezzi bianchi sembrano neri e/o viceversa.
 
@@ -105,6 +105,8 @@ Causa più probabile: prima di `.square` non era dichiarato nessun `font-family`
 **Fix:** abbandonato il rendering via glifo Unicode. I pezzi ora sono veri asset SVG — il set "Cburnett" di Lichess (`chess_app/frontend/pieces/*.svg`, 12 file, licenza GPLv2+, vedi `pieces/NOTICE.md`), scelto dall'utente per massima riconoscibilità (è il set default di Lichess). `PIECES` è stato sostituito da `PIECE_FILES` (mappa carattere FEN → nome file) e da una funzione `pieceImg(fenChar)` che crea un `<img class="piece-img" src="pieces/{file}.svg">`; usata sia in `renderBoard()` che in `askPromotion()` (che ora non hardcoda più due set di glifi per colore). Le classi CSS `.white-piece`/`.black-piece` e il `font-family` dedicato ai glifi scacchistici sono stati rimossi: il colore è nel file SVG stesso (fill/stroke), non più delegato a CSS su testo. Asset serviti come file statici accanto a `index.html` (non inline, non npm) — restano apribili via `file://` senza server, coerente col vincolo esistente.
 
 **Nota di verifica:** stesso limite ambientale delle versioni precedenti — nessun browser disponibile in questo sandbox. A differenza dei fix precedenti, però, qui il colore non dipende più dal font di sistema: i file SVG hanno `fill` esplicito nel markup, quindi il rischio di regressione per font-fallback è eliminato strutturalmente, non solo mitigato. Verifica visiva umana comunque raccomandata alla prima apertura.
+
+**Conferma finale — 11 luglio 2026:** l'utente ha aperto l'app in un browser reale e confermato che i pezzi sono ora perfettamente riconoscibili. Bug chiuso.
 
 ---
 
