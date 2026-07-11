@@ -15,7 +15,7 @@ Ultimo aggiornamento: **11 luglio 2026**.
 |--------|-------|------|
 | `fix/piece-svg-set` | ✅ **Merged in `main`** (PR #4) | Fix v3 pezzi (SVG Cburnett). Bug #6 in `docs/bugs.md` resta aperto finché l'utente non conferma visivamente su browser reale. |
 | `investigate/en-passant-move10` | ✅ **Merged in `main`** (PR #5) | Segnalazione "mossa illegale" `10. cxd6` verificata come en passant legale (non bug). Conflitto con `main` su `docs/bugs.md` risolto e pushato (merge `a6ebdba`), 21/21 test verdi. |
-| `feature/hint-engine-strength` | ✅ Pushed, pronto per PR | Forza regolabile dell'hint engine (Fable). `hint_elo` opzionale su `POST /game/{id}/hint`, default invariato (piena forza). Merge di `main` incluso, 24/24 test verdi. |
+| `feature/hint-engine-strength` | ✅ **Merged in `main`** (PR #6) | Forza regolabile dell'hint engine (Fable). `hint_elo` opzionale su `POST /game/{id}/hint`, default invariato (piena forza). 24/24 test verdi. |
 | `feature/persistence-db` | ✅ Pushed, **non ancora PR'd** | Fase 1 (persistenza SQLite): schema 5 tabelle, write-through cache, `think_ms`. Base per tutte le fasi successive. |
 | `feature/history-analytics-api` | 🔄 **In corso** (agente Sonnet) | Fase 2, metà "reads": stacked su `feature/persistence-db`. In lavorazione: `GET /games`, `/replay`, `DELETE`, `POST /games/import`, persistenza risultati in `/game/analyze`. Worktree: `.claude/worktrees/history-analytics-api`. **Non toccare finché l'agente non segnala fine** — poi verificare (test, no co-author trailer, working tree pulito) e proseguire con la metà Opus (stats/ELO simulato) sullo stesso branch. |
 
