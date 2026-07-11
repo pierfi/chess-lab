@@ -5,7 +5,9 @@ rileggere l'intera cronologia. Per il piano di fase completo (schema DB, endpoin
 vedi `CLAUDE.md` → sezione "Roadmap fasi" e la memoria di progetto
 `project_chess_lab_persistence_analytics`. Questo file è solo lo **snapshot dei branch in volo**.
 
-Ultimo aggiornamento: **11 luglio 2026**.
+Ultimo aggiornamento: **11 luglio 2026** (sessione in pausa per limite di utilizzo al 90%).
+
+**Nota di ripresa:** i due agenti background (`feature/history-growth-ui` su Fable, `feature/training-backend` su Opus) sono task asincroni gestiti dall'infrastruttura, non dalla sessione: continuano a girare anche se questa sessione si interrompe. Alla ripresa, controllare prima lo stato di questi due branch/worktree (vedi tabella sotto) prima di rilanciare qualsiasi cosa — se hanno già finito, verificarli (test, no co-author trailer, working tree pulito) e pushare prima di procedere oltre.
 
 ---
 
