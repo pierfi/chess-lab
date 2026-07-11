@@ -23,13 +23,17 @@ Ultimo aggiornamento: **11 luglio 2026** (sessione in pausa per limite di utiliz
 | `feature/history-growth-ui` | ✅ **Merged in `main`** (PR #9) | Fase 3 frontend completa: pannello Storico (lista/filtri/replay/delete/import PGN) + dashboard Crescita (grafici ELO simulato/accuracy via `buildTrendChartSvg()`, stesso stile di `buildEvalChartSvg()`). 68/68 test backend verdi, verificato live via jsdom (no browser disponibile in sandbox). |
 | `feature/training-backend` | ✅ **Merged in `main`** (PR #10) | Fase 4 backend completa: `GET/POST /training/puzzles/*` (SRS SM-2 semplificato), `GET /training/weaknesses` (fase/tema), `GET /training/endgames` + `start` (drill finali, `start_fen`). Design in `docs/training-mode.md`. 93/93 test verdi. Fix collaterale: `_create_new_game` ora deriva il turno iniziale da `board.turn` invece di assumere sempre la posizione standard (necessario per i drill con `start_fen` custom). |
 
-| `feature/training-ui` | 🔄 **In corso** (agente Fable) | Fase 5 frontend (ultima fase): pannello Allenamento — puzzle solver (`GET/POST /training/puzzles/*`), dashboard debolezze (`GET /training/weaknesses`), selezione drill finali (`GET /training/endgames` + `start`). Worktree: `.claude/worktrees/training-ui`. Non tocca il backend. |
+| `feature/training-ui` | ✅ **Merged in `main`** (PR #12) | Fase 5 frontend (ultima fase) completa: pannello Allenamento — puzzle solver SRS, dashboard debolezze, selezione drill finali. 93/93 test verdi, verificato live via jsdom su backend isolato (porta 8766, DB scratch, senza toccare il dev server dell'utente). |
 | `docs/en-passant-bug-analysis` | ✅ **Merged in `main`** (PR #11) | Documento di analisi tecnica standalone per Bug #7 (`docs/en-passant-bug7-deepdive.md`) — non è un bug, verifica indipendente con python-chess, nessuna modifica al codice. Fuori dall'iniziativa a 5 fasi. |
+| `docs/threatened-pieces-design` | 🔄 **In corso** (agente Opus) | Valutazione design (non implementazione) dell'idea "evidenziare pezzi in presa in Assisted Mode" — utente ha confermato: definizione = attaccato E non difeso (hanging), non attacco generico né SEE. Worktree: `.claude/worktrees/threatened-pieces-design`. |
 
 ## Prossimi passi, in ordine
 
-1. Attendere fine `feature/training-ui` (Fable) — verificare (test, no co-author trailer, working tree pulito) e push.
-2. Con Fase 5 completa, l'iniziativa persistenza + storia + allenamento a 5 fasi è **conclusa**.
+**L'iniziativa persistenza + storia + allenamento a 5 fasi è conclusa** (tutte le PR mergiate: #7, #8, #9, #10, #12).
+
+1. Attendere fine valutazione `docs/threatened-pieces-design` (Opus) — solo documento di design, nessuna implementazione da lanciare finché l'utente non decide sul da farsi.
+2. In coda (non lanciata): scacchiera ridimensionabile drag-to-resize, scopata in `docs/improvements.md`.
+3. In sospeso: valutazione generale dello stato del progetto da parte di Fable (richiesta dall'utente, da lanciare ora che Fase 5 è davvero completa).
 
 ## Da non dimenticare
 
