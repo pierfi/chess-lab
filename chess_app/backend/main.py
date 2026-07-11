@@ -4,7 +4,7 @@ import math
 import random
 import time
 import uuid
-from datetime import date
+from contextlib import asynccontextmanager
 
 import chess
 import chess.engine
@@ -12,8 +12,42 @@ import chess.pgn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
-app = FastAPI(title="Chess Lab", version="0.1.0")
+# main.py deve restare importabile sia come ``backend.main`` (test, che girano
+# dalla dir chess_app/) sia come ``main`` (uvicorn lanciato da chess_app/backend/,
+# vedi CLAUDE.md). Il try/except copre entrambe le invocazioni.
+try:
+    from backend.db import (
+        Game,
+        Move,
+        SessionLocal,
+        init_db,
+        session_scope,
+        utcnow,
+    )
+except ModuleNotFoundError:  # pragma: no cover - solo per uvicorn da backend/
+    from db import (
+        Game,
+        Move,
+        SessionLocal,
+        init_db,
+        session_scope,
+        utcnow,
+    )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Comodità stand-alone: crea le tabelle se mancano così l'app parte senza
+    # dover lanciare `alembic upgrade head` a mano (WAL/foreign_keys sono
+    # applicate per-connessione dall'event listener in db.py). Non eseguito dai
+    # test con TestClient(app) senza `with` — lì è conftest.py a creare le tabelle.
+    init_db()
+    yield
+
+
+app = FastAPI(title="Chess Lab", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,6 +79,10 @@ games: dict[str, dict] = {}
 class NewGameRequest(BaseModel):
     player_color: str = Field(pattern=r"^(white|black)$")
     engine_elo: int = Field(ge=400, le=2800)
+    # Posizione di partenza custom (drill finali, Fase 4). None = partita standard.
+    # Non ancora usata da nessun endpoint dedicato: qui viene solo persistita e
+    # propagata al chess.Board iniziale quando fornita.
+    start_fen: str | None = Field(default=None)
 
 class MoveRequest(BaseModel):
     game_id: str
@@ -61,15 +99,71 @@ class HintRequest(BaseModel):
 def _new_game_id() -> str:
     return uuid.uuid4().hex[:8]
 
-def _get_game(game_id: str) -> dict:
-    if game_id not in games:
-        raise HTTPException(status_code=404, detail="Game not found")
-    return games[game_id]
+def _starting_board(start_fen: str | None) -> chess.Board:
+    """Board iniziale: standard oppure dalla FEN custom (drill finali)."""
+    return chess.Board(start_fen) if start_fen else chess.Board()
 
-def _board_to_state(game_id: str, game: dict) -> dict:
+def _load_game_from_db(game_id: str) -> dict | None:
+    """Cache-miss: ricostruisce la partita dal DB rigiocando gli UCI in ordine
+    di ply dalla posizione iniziale (start_fen o standard). Restituisce il dict
+    game in-memory pronto per la cache, o None se la riga non esiste."""
+    with session_scope() as db:
+        row = db.get(Game, game_id)
+        if row is None:
+            return None
+        move_rows = (
+            db.execute(
+                select(Move).where(Move.game_id == game_id).order_by(Move.ply)
+            )
+            .scalars()
+            .all()
+        )
+        board = _starting_board(row.start_fen)
+        move_objects: list[chess.Move] = []
+        for mr in move_rows:
+            mv = chess.Move.from_uci(mr.uci)
+            board.push(mv)
+            move_objects.append(mv)
+
+        # last_engine_move = UCI dell'ultima mossa solo se è dell'engine (cioè
+        # se l'ultima riga è del colore avversario al player).
+        engine_color = "black" if row.player_color == "white" else "white"
+        last_engine_move = None
+        if move_rows and move_rows[-1].color == engine_color:
+            last_engine_move = move_rows[-1].uci
+
+        return {
+            "board": board,
+            "player_color": row.player_color,
+            "engine_elo": row.engine_elo,
+            "move_objects": move_objects,
+            "last_engine_move": last_engine_move,
+            "created_at": row.created_at.strftime("%Y.%m.%d"),
+            "start_fen": row.start_fen,
+            # last_ready_at assente: la prima mossa dopo un restart registra
+            # think_ms = NULL (comportamento atteso, vedi CLAUDE.md).
+        }
+
+def _get_game(game_id: str) -> dict:
+    """Write-through cache: hit → oggetto vivo in memoria; miss → ricostruzione
+    dal DB (o 404 se assente), poi ripopola la cache."""
+    if game_id in games:
+        return games[game_id]
+    game = _load_game_from_db(game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+    games[game_id] = game
+    return game
+
+def _build_pgn(game: dict) -> str:
+    """Costruisce il PGN dalla partita. Condiviso tra la risposta API
+    (_board_to_state) e la persistenza (snapshot denormalizzato in games.pgn),
+    così la logica non è duplicata. Onora start_fen per i drill da FEN custom."""
     board = game["board"]
-    # Build PGN
+    start_fen = game.get("start_fen")
     pgn_game = chess.pgn.Game()
+    if start_fen:
+        pgn_game.setup(start_fen)
     pgn_game.headers["Event"] = "Chess Lab"
     pgn_game.headers["Date"] = game["created_at"]
     pgn_game.headers["White"] = "Player" if game["player_color"] == "white" else "Stockfish"
@@ -79,13 +173,17 @@ def _board_to_state(game_id: str, game: dict) -> dict:
     node = pgn_game
     for move in game["move_objects"]:
         node = node.add_variation(move)
+    return str(pgn_game)
+
+def _board_to_state(game_id: str, game: dict) -> dict:
+    board = game["board"]
 
     result = None
     if board.is_game_over():
         result = board.result()
 
     san_history = []
-    replay_board = chess.Board()
+    replay_board = _starting_board(game.get("start_fen"))
     for m in game["move_objects"]:
         san_history.append(replay_board.san(m))
         replay_board.push(m)
@@ -93,7 +191,7 @@ def _board_to_state(game_id: str, game: dict) -> dict:
     return {
         "game_id": game_id,
         "fen": board.fen(),
-        "pgn": str(pgn_game),
+        "pgn": _build_pgn(game),
         "turn": "white" if board.turn == chess.WHITE else "black",
         "is_check": board.is_check(),
         "is_game_over": board.is_game_over(),
@@ -105,13 +203,17 @@ def _board_to_state(game_id: str, game: dict) -> dict:
         "engine_elo": game["engine_elo"],
     }
 
-def _engine_move(board: chess.Board, elo: int) -> chess.Move:
+def _engine_move(board: chess.Board, elo: int) -> tuple[chess.Move, float]:
     """Chiede a Stockfish una mossa. Apre e chiude l'engine ad ogni chiamata.
 
     Impone un tempo minimo di "riflessione" randomizzato: a ELO bassi la ricerca
     è quasi istantanea (depth 1) e la risposta immediata rompe l'illusione di
     giocare contro un avversario. Se l'engine è già lento (depth alte), nessun
     ritardo extra viene aggiunto.
+
+    Ritorna (mossa, elapsed) dove ``elapsed`` è il wall-time REALE della ricerca
+    Stockfish, misurato PRIMA del sleep cosmetico. È questo — non il padding —
+    che va persistito come think_ms della mossa engine (onestà del dato).
     """
     skill, depth = elo_to_skill_depth(elo)
     target_think = random.uniform(0.6, 1.5)  # seconds
@@ -119,10 +221,10 @@ def _engine_move(board: chess.Board, elo: int) -> chess.Move:
     with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
         engine.configure({"Skill Level": skill})
         result = engine.play(board, chess.engine.Limit(depth=depth))
-    elapsed = time.monotonic() - start
+    elapsed = time.monotonic() - start  # tempo di ricerca reale (esclude il sleep)
     if elapsed < target_think:
-        time.sleep(target_think - elapsed)
-    return result.move
+        time.sleep(target_think - elapsed)  # padding cosmetico, NON persistito
+    return result.move, elapsed
 
 def _check_game_over(board: chess.Board) -> dict | None:
     """Restituisce info game-over o None."""
@@ -160,6 +262,58 @@ def _cp_loss_to_move_accuracy(loss_cp: float) -> float:
     accuracy = 103.1668 * math.exp(-0.04354 * loss_cp) - 3.1669
     return max(0.0, min(100.0, accuracy))
 
+# -------------------------------------------------------------------
+# Persistenza (write-through cache): il DB è la fonte durevole, la cache
+# in-memory ``games`` resta l'hot path. Vedi db.py per lo schema.
+# -------------------------------------------------------------------
+def _persist_new_game(game_id: str, game: dict, created_at, first_move: dict | None) -> None:
+    """Inserisce la riga games alla creazione (+ l'eventuale mossa d'apertura
+    dell'engine se il player è nero)."""
+    over = _check_game_over(game["board"])
+    with session_scope() as db:
+        db.add(Game(
+            id=game_id,
+            player_color=game["player_color"],
+            engine_elo=game["engine_elo"],
+            start_fen=game.get("start_fen"),
+            source="play",
+            pgn=_build_pgn(game),
+            created_at=created_at,
+            result=over["result"] if over else None,
+            result_reason=over["reason"] if over else None,
+            finished_at=created_at if over else None,
+        ))
+        if first_move is not None:
+            db.add(Move(game_id=game_id, created_at=created_at, **first_move))
+
+def _persist_move_batch(game_id: str, game: dict, pending: list[dict], over: dict | None) -> None:
+    """Persiste le righe moves prodotte da una richiesta /game/move e aggiorna
+    lo snapshot denormalizzato (pgn) + gli esiti di fine partita, in una sola
+    sessione. Se la riga games manca (partita creata fuori da /game/new) la
+    crea difensivamente, così ogni mossa finisce comunque nel DB durevole."""
+    now = utcnow()
+    with session_scope() as db:
+        row = db.get(Game, game_id)
+        if row is None:
+            row = Game(
+                id=game_id,
+                player_color=game["player_color"],
+                engine_elo=game["engine_elo"],
+                start_fen=game.get("start_fen"),
+                source="play",
+                created_at=now,
+            )
+            db.add(row)
+        for mv in pending:
+            db.add(Move(game_id=game_id, created_at=now, **mv))
+        row.pgn = _build_pgn(game)
+        if over:
+            row.result = over["result"]
+            row.result_reason = over["reason"]
+            if row.finished_at is None:
+                row.finished_at = now
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -167,24 +321,48 @@ def health():
 @app.post("/game/new")
 def new_game(req: NewGameRequest):
     game_id = _new_game_id()
-    board = chess.Board()
+
+    # Board iniziale: standard oppure da start_fen (validata qui per non far
+    # esplodere in un 500 se la FEN è malformata).
+    try:
+        board = _starting_board(req.start_fen)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid start_fen")
+
+    created_at = utcnow()
     game = {
         "board": board,
         "player_color": req.player_color,
         "engine_elo": req.engine_elo,
         "move_objects": [],
         "last_engine_move": None,
-        "created_at": date.today().strftime("%Y.%m.%d"),
+        "created_at": created_at.strftime("%Y.%m.%d"),
+        "start_fen": req.start_fen,
     }
 
-    # Se il player è nero, Stockfish gioca per primo
+    # Se il player è nero, Stockfish gioca per primo (ply 1, colore bianco).
+    first_move = None
     if req.player_color == "black":
-        engine_m = _engine_move(board, req.engine_elo)
+        fen_before = board.fen()
+        engine_m, elapsed = _engine_move(board, req.engine_elo)
+        san = board.san(engine_m)  # SAN calcolata PRIMA del push
         board.push(engine_m)
         game["move_objects"].append(engine_m)
         game["last_engine_move"] = engine_m.uci()
+        first_move = {
+            "ply": 1,
+            "color": "white",
+            "uci": engine_m.uci(),
+            "san": san,
+            "fen_before": fen_before,
+            "think_ms": round(elapsed * 1000),
+        }
 
     games[game_id] = game
+    _persist_new_game(game_id, game, created_at, first_move)
+
+    # Marker per il think time della prossima mossa del player.
+    game["last_ready_at"] = time.monotonic()
     return _board_to_state(game_id, game)
 
 @app.post("/game/move")
@@ -209,29 +387,64 @@ def make_move(req: MoveRequest):
     if move not in board.legal_moves:
         raise HTTPException(status_code=400, detail="Illegal move")
 
-    # Esegui mossa player
+    # Think time del player: da quando la risposta precedente gli ha ridato il
+    # turno (marker last_ready_at) fino ad ora. Assente dopo un restart → NULL.
+    last_ready = game.get("last_ready_at")
+    player_think_ms = (
+        round((time.monotonic() - last_ready) * 1000) if last_ready is not None else None
+    )
+
+    player_color = game["player_color"]
+    engine_color = "black" if player_color == "white" else "white"
+    pending: list[dict] = []
+
+    # Esegui mossa player (SAN e fen_before catturati PRIMA del push)
+    player_fen_before = board.fen()
+    player_san = board.san(move)
     board.push(move)
     game["move_objects"].append(move)
     game["last_engine_move"] = None
+    pending.append({
+        "ply": len(game["move_objects"]),
+        "color": player_color,
+        "uci": move.uci(),
+        "san": player_san,
+        "fen_before": player_fen_before,
+        "think_ms": player_think_ms,
+    })
 
     # Controlla game-over dopo mossa player
     over = _check_game_over(board)
     if over:
+        _persist_move_batch(req.game_id, game, pending, over)
         state = _board_to_state(req.game_id, game)
         state["game_over"] = over
+        game["last_ready_at"] = time.monotonic()
         return state
 
-    # Mossa Stockfish
-    engine_m = _engine_move(board, game["engine_elo"])
+    # Mossa Stockfish (think_ms = wall-time reale della ricerca, no padding)
+    engine_fen_before = board.fen()
+    engine_m, elapsed = _engine_move(board, game["engine_elo"])
+    engine_san = board.san(engine_m)
     board.push(engine_m)
     game["move_objects"].append(engine_m)
     game["last_engine_move"] = engine_m.uci()
+    pending.append({
+        "ply": len(game["move_objects"]),
+        "color": engine_color,
+        "uci": engine_m.uci(),
+        "san": engine_san,
+        "fen_before": engine_fen_before,
+        "think_ms": round(elapsed * 1000),
+    })
 
     # Controlla game-over dopo mossa engine
-    state = _board_to_state(req.game_id, game)
     over = _check_game_over(board)
+    _persist_move_batch(req.game_id, game, pending, over)
+    state = _board_to_state(req.game_id, game)
     if over:
         state["game_over"] = over
+    game["last_ready_at"] = time.monotonic()
     return state
 
 @app.get("/game/{game_id}")

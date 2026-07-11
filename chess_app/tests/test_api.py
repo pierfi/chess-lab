@@ -3,7 +3,10 @@
 import chess
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+
 from backend.main import app, games
+from backend.db import SessionLocal, Game, Move
 
 
 @pytest.fixture
@@ -258,3 +261,141 @@ class TestHealth:
         r = client.get("/health")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
+
+
+# -------------------------------------------------------------------
+# Persistenza (Fase 3): write-through cache + timing + start_fen
+# -------------------------------------------------------------------
+class TestPersistence:
+    def test_new_game_creates_db_row(self, client):
+        r = client.post("/game/new", json={"player_color": "white", "engine_elo": 800})
+        gid = r.json()["game_id"]
+        with SessionLocal() as db:
+            row = db.get(Game, gid)
+            assert row is not None
+            assert row.player_color == "white"
+            assert row.engine_elo == 800
+            assert row.source == "play"
+            assert row.start_fen is None
+            assert row.created_at is not None
+            assert row.pgn is not None
+            # Nessuna mossa ancora (player bianco muove per primo)
+            assert row.moves == []
+
+    def test_new_game_black_persists_opening_move(self, client):
+        """Player nero → Stockfish gioca il ply 1 (bianco), che va persistito."""
+        r = client.post("/game/new", json={"player_color": "black", "engine_elo": 800})
+        gid = r.json()["game_id"]
+        with SessionLocal() as db:
+            moves = (
+                db.execute(select(Move).where(Move.game_id == gid).order_by(Move.ply))
+                .scalars()
+                .all()
+            )
+            assert len(moves) == 1
+            assert moves[0].ply == 1
+            assert moves[0].color == "white"
+            assert moves[0].fen_before == chess.Board().fen()
+            assert moves[0].think_ms is not None  # wall-time reale della ricerca
+
+    def test_move_creates_db_rows(self, client, white_game):
+        gid = white_game["game_id"]
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+        with SessionLocal() as db:
+            moves = (
+                db.execute(select(Move).where(Move.game_id == gid).order_by(Move.ply))
+                .scalars()
+                .all()
+            )
+            # mossa player + risposta engine
+            assert len(moves) == 2
+            player_mv, engine_mv = moves
+            assert player_mv.ply == 1
+            assert player_mv.color == "white"
+            assert player_mv.uci == "e2e4"
+            assert player_mv.san == "e4"
+            assert player_mv.fen_before == chess.Board().fen()
+            assert engine_mv.ply == 2
+            assert engine_mv.color == "black"
+            # PGN snapshot aggiornato ad ogni persistenza
+            row = db.get(Game, gid)
+            assert row.pgn and "1." in row.pgn
+
+    def test_think_ms_captured_on_move(self, client, white_game):
+        """think_ms non-null sia sulla mossa player (marker last_ready_at) sia
+        sulla risposta engine (wall-time reale)."""
+        gid = white_game["game_id"]
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        with SessionLocal() as db:
+            moves = (
+                db.execute(select(Move).where(Move.game_id == gid).order_by(Move.ply))
+                .scalars()
+                .all()
+            )
+            player_mv, engine_mv = moves
+            assert player_mv.think_ms is not None
+            assert player_mv.think_ms >= 0
+            assert engine_mv.think_ms is not None
+            assert engine_mv.think_ms >= 0
+
+    def test_cache_miss_recovery(self, client, white_game):
+        """Simula un restart svuotando la cache in-memory: GET /game/{id} deve
+        ricostruire la board dal DB rigiocando gli UCI."""
+        gid = white_game["game_id"]
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        client.post("/game/move", json={"game_id": gid, "move_uci": "g1f3"})
+        before = client.get(f"/game/{gid}").json()
+
+        # "Restart": la cache viva sparisce, il DB resta.
+        games.clear()
+        assert gid not in games
+
+        after = client.get(f"/game/{gid}").json()
+        assert gid in games  # cache ripopolata dal DB
+        assert after["fen"] == before["fen"]
+        assert after["move_history"] == before["move_history"]
+        assert after["move_history_san"] == before["move_history_san"]
+        # La board ricostruita accetta ancora mosse legali coerenti.
+        assert after["turn"] == before["turn"]
+
+    def test_cache_miss_not_found(self, client):
+        """Cache miss + riga DB assente → 404 (non 500)."""
+        games.clear()
+        r = client.get("/game/deadbeef")
+        assert r.status_code == 404
+
+    def test_start_fen_flows_through(self, client):
+        custom = "4k3/8/4K3/8/8/8/8/7R w - - 0 1"
+        r = client.post(
+            "/game/new",
+            json={"player_color": "white", "engine_elo": 800, "start_fen": custom},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        # Player bianco + FEN con bianco al tratto: nessuna mossa engine → FEN invariata
+        assert data["fen"] == custom
+        assert data["move_history"] == []
+        with SessionLocal() as db:
+            row = db.get(Game, data["game_id"])
+            assert row.start_fen == custom
+
+    def test_start_fen_reconstructs_on_cache_miss(self, client):
+        """Una partita con start_fen custom si ricostruisce dalla posizione
+        giusta dopo un cache miss (non dalla posizione standard)."""
+        custom = "4k3/8/4K3/8/8/8/8/7R w - - 0 1"
+        r = client.post(
+            "/game/new",
+            json={"player_color": "white", "engine_elo": 800, "start_fen": custom},
+        )
+        gid = r.json()["game_id"]
+        games.clear()
+        after = client.get(f"/game/{gid}").json()
+        assert after["fen"] == custom
+
+    def test_invalid_start_fen_rejected(self, client):
+        r = client.post(
+            "/game/new",
+            json={"player_color": "white", "engine_elo": 800, "start_fen": "not-a-fen"},
+        )
+        assert r.status_code == 400

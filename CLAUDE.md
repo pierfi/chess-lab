@@ -96,22 +96,62 @@ Note tecniche:
 
 ---
 
-### 🔲 Fase 3 — Persistenza & storia
+### 🔄 Fase 3 — Persistenza & storia (fondamenta completate)
 **Target: inizio-metà maggio 2026 · ~2 settimane · ~8 ore**
 
 Obiettivo: le partite sopravvivono al riavvio del server. Storico consultabile e replay.
 
-| Settimana | Attività | Ore stimate | Modello suggerito |
-|-----------|----------|-------------|-------------------|
-| Sett. 5 mag | Schema SQLite + SQLAlchemy, migrazione in-memory → DB | ~3 ore | Opus |
-| Sett. 5 mag | `GET /games` con paginazione, `DELETE /game/{id}` | ~1.5 ore | Sonnet |
-| Sett. 12 mag | `GET /game/{id}/replay` (sequenza FEN) | ~1.5 ore | Sonnet |
-| Sett. 12 mag | Frontend: pagina storico, replay con frecce, import PGN | ~2 ore | Opus |
+**Stato:** la fondazione di persistenza (schema completo delle 5 tabelle + migration Alembic iniziale + wiring `games`/`moves` su `/game/new` e `/game/move` con think time reale) è **completata**. Gli endpoint di storico/replay/delete/import restano da fare in una fase successiva (vedi checklist sotto).
 
-Tabelle DB:
-- `games` — id, player_color, engine_elo, result, created_at, pgn
-- `moves` — id, game_id, ply, uci, san, created_at
-- `analysis_results` — id, game_id, ply, classification, loss_cp, score_cp, best_move_uci
+| Settimana | Attività | Ore stimate | Modello suggerito | Stato |
+|-----------|----------|-------------|-------------------|-------|
+| Sett. 5 mag | Schema SQLite + SQLAlchemy (5 tabelle) + migration Alembic iniziale | ~3 ore | Opus | ✅ fatto |
+| Sett. 5 mag | Write-through cache + persistenza `games`/`moves` con think time su `/game/new` e `/game/move`; `start_fen` su `NewGameRequest` | ~2 ore | Opus | ✅ fatto |
+| Sett. 5 mag | `GET /games` con paginazione, `DELETE /game/{id}` | ~1.5 ore | Sonnet | 🔲 da fare |
+| Sett. 12 mag | `GET /game/{id}/replay` (sequenza FEN) | ~1.5 ore | Sonnet | 🔲 da fare |
+| Sett. 12 mag | Persistenza risultati `/game/analyze` → `analysis_results` (colonne già presenti) | ~1 ora | Sonnet | 🔲 da fare |
+| Sett. 12 mag | Frontend: pagina storico, replay con frecce, import PGN | ~2 ore | Opus | 🔲 da fare |
+
+#### Schema DB reale (implementato)
+
+Tutte e 5 le tabelle esistono già a schema (SQLAlchemy in `backend/db.py`, migration in `alembic/versions/`), anche se solo `games`/`moves` sono wired in questa fase: le fasi successive (analisi, puzzle, SRS) trovano le tabelle pronte e non devono scrivere migration contro uno schema in movimento. Niente `users` (singolo utente locale, nessuna auth). FK con `ON DELETE CASCADE`, enforcement SQLite attivo (`PRAGMA foreign_keys=ON`).
+
+- **`games`** — `id` TEXT PK (`uuid4().hex[:8]`, stesso schema di prima, API/frontend ci dipendono), `player_color`, `engine_elo`, `result` NULL, `result_reason` NULL (`checkmate`/`stalemate`/`insufficient_material`/`fifty_moves`/`threefold_repetition`, da `_check_game_over()`), `start_fen` TEXT NULL (posizione di partenza custom; NULL = standard), `source` TEXT NOT NULL DEFAULT `'play'` (`play`/`endgame_drill`/`import` — solo `play` scritto ora, nessun CHECK così i valori futuri non vengono rifiutati), `pgn` TEXT NULL (snapshot denormalizzato, aggiornato ad ogni persistenza di mossa), `created_at` DATETIME reale, `finished_at` DATETIME NULL (settato a fine partita). Colonne riepilogo analisi lasciate NULL qui (le popola la fase analisi): `analyzed_at`, `player_accuracy`, `blunders`, `mistakes`, `inaccuracies`.
+- **`moves`** — `id` INTEGER PK, `game_id` FK→games CASCADE (indicizzata), `ply` INT (1-based), `color` (`white`/`black`, memorizzato, non derivato), `uci`, `san`, `fen_before` TEXT (posizione **prima** del ply — rende banali replay e FEN-puzzle a valle, senza ri-simulare), `think_ms` INTEGER NULL (vedi timing sotto), `created_at` DATETIME. Unique `(game_id, ply)`.
+- **`analysis_results`** (solo schema) — `id` PK, `game_id` FK CASCADE, `ply`, `classification`, `loss_cp`, `score_cp`, `best_move_uci` NULL, `is_mate_swing` BOOLEAN. Unique `(game_id, ply)`.
+- **`puzzles`** (solo schema, self-generated Fase 4) — `id` PK, `game_id` FK CASCADE, `ply`, `fen`, `best_move_uci`, `source` (`blunder`/`mistake`), `created_at`. Unique `(game_id, ply)`.
+- **`srs_cards`** (solo schema, SM-2 Fase 4) — `id` PK, `puzzle_id` FK→puzzles CASCADE UNIQUE, `due_at`, `interval_days`, `ease_factor` FLOAT DEFAULT 2.5, `correct_streak` INT DEFAULT 0, `last_reviewed_at` NULL, `created_at`.
+
+#### Write-through cache
+
+La cache in-memory `games: dict[str, dict]` resta l'**hot path** (contiene gli oggetti `chess.Board` vivi, non serializzabili). Il DB è la fonte **durevole**: le righe `moves` (UCI in ordine di ply) sono la verità da cui ricostruire.
+- `_get_game(id)`: cache-hit → oggetto vivo; cache-miss → `_load_game_from_db()` rigioca gli UCI dal `start_fen` (o dalla posizione standard) in una fresh `chess.Board`, ripopola la cache, poi serve normalmente; 404 se la riga non esiste. Condiviso da tutti gli endpoint, quindi tutta l'app sopravvive a un restart, non solo `GET /game/{id}`.
+- `/game/new` e `/game/move` inseriscono le righe **oltre** a mutare la cache; `games.pgn` (+ `result`/`result_reason`/`finished_at` a fine partita) è riscritto ad ogni persistenza così lo snapshot non diventa mai stale. La logica PGN è stata estratta in `_build_pgn(game)`, condivisa tra risposta API e persistenza (nessuna duplicazione); onora `start_fen`.
+
+#### Timing — think time reale (NON un chess clock)
+
+`moves.think_ms` cattura il tempo di riflessione reale, **misurato in scrittura**, non ricavato a posteriori:
+- **Mossa player**: marker transiente non-persistito `game["last_ready_at"] = time.monotonic()`, settato alla fine di ogni risposta che ridà il turno a un lato (dopo `new_game` e dopo ogni `make_move`). All'inizio di `/game/move`: `player_think_ms = round((monotonic - last_ready_at) * 1000)`.
+- **Mossa engine**: `_engine_move()` ritorna `(mossa, elapsed)` dove `elapsed` è il wall-time REALE della ricerca Stockfish, misurato **prima** del `sleep` cosmetico. Il padding `random.uniform(0.6, 1.5)` è solo UX pacing per i bassi ELO (ricerca quasi istantanea) e viene **escluso** dal dato — persistere il padding sarebbe disonesto.
+- **Scartato di proposito**: il diff tra `moves.created_at` consecutivi. È fragile — si rompe con la persistenza in batch, confonde latenza rete/handler col think time, ed è inquinato dal sleep cosmetico lato engine.
+- **Dopo un restart**: una partita ricostruita da cache-miss non ha `last_ready_at`, quindi la **prima** mossa post-restart registra `think_ms = NULL`. È comportamento atteso, non un bug — non lo risolviamo.
+- Questa è **misurazione passiva**. NON è una feature time-control/clock/flagging: quella è la voce già a roadmap in Fase 6 ("Time control"), fuori scope qui.
+
+#### Sessione / WAL / threading
+
+- Gli endpoint sono `def` sincroni (girano nel threadpool FastAPI): engine creato con `connect_args={"check_same_thread": False}`, `sessionmaker`, e un context manager `session_scope()` (commit in uscita / rollback su errore / close) usato inline.
+- **WAL + `foreign_keys=ON`** sono applicati **per-connessione** via event listener `connect` in `db.py` (più robusto di un singolo PRAGMA "at startup", copre ogni connessione del pool). WAL riduce la contesa di lock tra una scrittura `/game/move` e una lettura `/hint` concorrente (i due processi Stockfish sono già isolati). SQLite è single-writer: sufficiente per un utente locale, niente di più elaborato.
+
+#### Alembic — batch mode obbligatorio per il futuro
+
+Migration iniziale greenfield in `alembic/versions/` (`alembic upgrade head` dalla dir `chess_app/`). `alembic/env.py` prende URL e metadata da `backend.db` (unica fonte di verità; rispetta la env var `CHESS_LAB_DB`) e ha **`render_as_batch=True`** già attivo: qualsiasi migration **futura** che faccia ALTER/DROP su queste tabelle DEVE girare in batch mode perché il supporto `ALTER TABLE` di SQLite è molto limitato — configurato ora così le fasi successive non se ne devono ricordare. Comodità stand-alone: il `lifespan` dell'app chiama `Base.metadata.create_all()` (idempotente) così l'app parte anche senza lanciare Alembic a mano; per un setup Alembic-managed da zero, lanciare `alembic upgrade head` su un DB vuoto.
+
+#### Dipendenze e file nuovi
+
+- Nuove dep in `requirements.txt`: `sqlalchemy==2.0.51`, `alembic==1.18.5`.
+- `.gitignore`: aggiunti `*.db`, `*.db-wal`, `*.db-shm` (il file SQLite è runtime, non versionato).
+- File DB configurabile via env var `CHESS_LAB_DB` (default `backend/chess_lab.db`); i test puntano a un DB temporaneo isolato (`conftest.py`).
+- `start_fen` esiste ora su `NewGameRequest` e sulla tabella `games`, pronto perché la fase drill-finali lo usi (`POST /training/endgames/{id}/start`); qui è validato (400 se FEN malformata) e propagato al `chess.Board` iniziale, ma nessun endpoint dedicato lo consuma ancora.
 
 ---
 
