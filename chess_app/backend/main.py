@@ -1,24 +1,27 @@
 """Chess Lab — FastAPI backend per giocare e analizzare partite contro Stockfish."""
 
+import io
 import math
 import random
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
 
 import chess
 import chess.engine
 import chess.pgn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 
 # main.py deve restare importabile sia come ``backend.main`` (test, che girano
 # dalla dir chess_app/) sia come ``main`` (uvicorn lanciato da chess_app/backend/,
 # vedi CLAUDE.md). Il try/except copre entrambe le invocazioni.
 try:
     from backend.db import (
+        AnalysisResult,
         Game,
         Move,
         SessionLocal,
@@ -28,6 +31,7 @@ try:
     )
 except ModuleNotFoundError:  # pragma: no cover - solo per uvicorn da backend/
     from db import (
+        AnalysisResult,
         Game,
         Move,
         SessionLocal,
@@ -98,6 +102,9 @@ class HintRequest(BaseModel):
     # Forza dell'hint engine espressa come ELO (stessa scala dell'avversario).
     # None = piena forza, comportamento storico: nessuno Skill Level configurato.
     hint_elo: int | None = Field(default=None, ge=400, le=2800)
+
+class ImportPgnRequest(BaseModel):
+    pgn: str
 
 def _new_game_id() -> str:
     return uuid.uuid4().hex[:8]
@@ -266,6 +273,91 @@ def _cp_loss_to_move_accuracy(loss_cp: float) -> float:
     return max(0.0, min(100.0, accuracy))
 
 # -------------------------------------------------------------------
+# Filtri storico condivisi tra GET /games e gli endpoint /stats/*.
+# Fonte unica di verità per la convenzione win/loss/draw (relativa a
+# player_color, NON alla stringa PGN grezza) e per i filtri di query.
+# -------------------------------------------------------------------
+def _result_predicate(result: str | None):
+    """Predicato SQL per il filtro result relativo a player_color.
+    win → il player ha vinto col suo colore; loss → l'inverso; draw → patta.
+    None (o valore ignoto) = nessun filtro."""
+    if result == "win":
+        return or_(
+            and_(Game.player_color == "white", Game.result == "1-0"),
+            and_(Game.player_color == "black", Game.result == "0-1"),
+        )
+    if result == "loss":
+        return or_(
+            and_(Game.player_color == "white", Game.result == "0-1"),
+            and_(Game.player_color == "black", Game.result == "1-0"),
+        )
+    if result == "draw":
+        return Game.result == "1/2-1/2"
+    return None
+
+def _player_result(player_color: str, result: str | None) -> str | None:
+    """Versione Python di _result_predicate: classifica un singolo esito dal
+    punto di vista del player. None se la partita non è decisa (in corso) o se
+    l'esito non è uno dei tre canonici. Stessa convenzione, calcolata in-memory
+    per gli endpoint che iterano le righe (es. la simulazione ELO)."""
+    if result == "1/2-1/2":
+        return "draw"
+    if (player_color == "white" and result == "1-0") or (
+        player_color == "black" and result == "0-1"
+    ):
+        return "win"
+    if result in ("1-0", "0-1"):
+        return "loss"
+    return None
+
+def _parse_date_range(
+    date_from: str | None, date_to: str | None
+) -> tuple[datetime | None, datetime | None]:
+    """Converte i filtri date (YYYY-MM-DD, su games.created_at) in un intervallo
+    [inizio, fine-esclusiva). date_to è inclusiva del giorno intero: internamente
+    diventa mezzanotte del giorno dopo (end-exclusive), così una partita giocata
+    alle 23:00 del giorno filtrato è compresa. 400 se il formato è errato."""
+    dt_from = dt_to = None
+    try:
+        if date_from is not None:
+            dt_from = datetime.combine(date.fromisoformat(date_from), datetime.min.time())
+        if date_to is not None:
+            dt_to = datetime.combine(
+                date.fromisoformat(date_to), datetime.min.time()
+            ) + timedelta(days=1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date (expected YYYY-MM-DD)")
+    return dt_from, dt_to
+
+def _game_filter_conditions(
+    color: str | None,
+    source: str | None,
+    dt_from: datetime | None,
+    dt_to: datetime | None,
+) -> list:
+    """Condizioni WHERE comuni a GET /games e /stats/*: source (default 'play' —
+    import e drill esclusi salvo richiesta esplicita), player_color, range date."""
+    conds = [Game.source == (source if source is not None else "play")]
+    if color is not None:
+        conds.append(Game.player_color == color)
+    if dt_from is not None:
+        conds.append(Game.created_at >= dt_from)
+    if dt_to is not None:
+        conds.append(Game.created_at < dt_to)
+    return conds
+
+# Simulazione ELO (vedi docs/growth-analytics.md). NON è un rating rigoroso: è
+# una trend line direzionale. Update Elo classico contro engine_elo come rating
+# avversario, K fisso, seed iniziale.
+SIM_ELO_SEED = 1200
+SIM_ELO_K = 32
+SIM_ELO_RECENT_WINDOW = 10
+
+def _elo_expected(player_elo: float, opponent_elo: float) -> float:
+    """Punteggio atteso Elo del player contro l'avversario (0..1)."""
+    return 1.0 / (1.0 + 10 ** ((opponent_elo - player_elo) / 400.0))
+
+# -------------------------------------------------------------------
 # Persistenza (write-through cache): il DB è la fonte durevole, la cache
 # in-memory ``games`` resta l'hot path. Vedi db.py per lo schema.
 # -------------------------------------------------------------------
@@ -315,6 +407,52 @@ def _persist_move_batch(game_id: str, game: dict, pending: list[dict], over: dic
             row.result_reason = over["reason"]
             if row.finished_at is None:
                 row.finished_at = now
+
+def _persist_analysis(
+    game_id: str,
+    analysis_moves: list[dict],
+    accuracy: float,
+    blunders: int,
+    mistakes: int,
+    inaccuracies: int,
+) -> None:
+    """Upsert dei risultati di /game/analyze in ``analysis_results`` (unique su
+    game_id+ply: ri-analizzare la stessa partita aggiorna le righe esistenti,
+    non le duplica) + aggiornamento delle colonne di riepilogo su ``games`` così
+    una game-list view può mostrare lo stato di analisi senza ri-interrogare
+    analysis_results.
+
+    Difensivo: se la riga games non esiste (es. una partita iniettata solo in
+    cache, come nei test che bypassano /game/new) non scrive nulla — un insert
+    su analysis_results fallirebbe comunque la FK con foreign_keys=ON."""
+    now = utcnow()
+    with session_scope() as db:
+        game_row = db.get(Game, game_id)
+        if game_row is None:
+            return
+
+        existing = {
+            row.ply: row
+            for row in db.execute(
+                select(AnalysisResult).where(AnalysisResult.game_id == game_id)
+            ).scalars().all()
+        }
+        for m in analysis_moves:
+            row = existing.get(m["ply"])
+            if row is None:
+                row = AnalysisResult(game_id=game_id, ply=m["ply"])
+                db.add(row)
+            row.classification = m["classification"]
+            row.loss_cp = m["loss_cp"]
+            row.score_cp = m["score_cp"]
+            row.best_move_uci = m["best_move_uci"]
+            row.is_mate_swing = m["is_mate_swing"]
+
+        game_row.analyzed_at = now
+        game_row.player_accuracy = accuracy
+        game_row.blunders = blunders
+        game_row.mistakes = mistakes
+        game_row.inaccuracies = inaccuracies
 
 
 @app.get("/health")
@@ -611,12 +749,386 @@ def analyze_game(req: AnalyzeRequest):
     else:
         accuracy = 0
 
+    accuracy_score = round(accuracy, 1)
+
+    # Persistenza additiva: la risposta al chiamante resta identica a prima,
+    # questa è solo la scrittura durevole in analysis_results + il riepilogo
+    # su games (vedi _persist_analysis per i dettagli di upsert/idempotenza).
+    _persist_analysis(req.game_id, analysis_moves, accuracy_score, blunders, mistakes, inaccuracies)
+
     return {
         "game_id": req.game_id,
         "total_moves": len(moves),
         "blunders": blunders,
         "mistakes": mistakes,
         "inaccuracies": inaccuracies,
-        "accuracy_score": round(accuracy, 1),
+        "accuracy_score": accuracy_score,
         "moves": analysis_moves,
+    }
+
+@app.get("/games")
+def list_games(
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20, ge=1, le=100),
+    color: str | None = Query(default=None, pattern=r"^(white|black)$"),
+    result: str | None = Query(default=None, pattern=r"^(win|loss|draw)$"),
+    source: str | None = Query(default=None),
+):
+    """Lista paginata/filtrata delle partite dal DB (non dalla cache in-memory,
+    così funziona anche per partite non attualmente cache-hot). ``result`` è
+    relativo a ``player_color`` (non la stringa PGN grezza): win/loss/draw dal
+    punto di vista del giocatore. Default ``source``: solo 'play' — i drill di
+    finali e gli import restano fuori dallo storico partite di default."""
+    with session_scope() as db:
+        stmt = select(Game).where(
+            *_game_filter_conditions(color, source, None, None)
+        )
+        pred = _result_predicate(result)
+        if pred is not None:
+            stmt = stmt.where(pred)
+
+        total = db.execute(
+            select(func.count()).select_from(stmt.subquery())
+        ).scalar_one()
+
+        rows = db.execute(
+            stmt.order_by(Game.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        ).scalars().all()
+
+        # Move count in blocco (una query sola per l'intera pagina, non N+1).
+        game_ids = [row.id for row in rows]
+        move_counts: dict[str, int] = {}
+        if game_ids:
+            move_counts = dict(
+                db.execute(
+                    select(Move.game_id, func.count(Move.id))
+                    .where(Move.game_id.in_(game_ids))
+                    .group_by(Move.game_id)
+                ).all()
+            )
+
+        items = [
+            {
+                "game_id": row.id,
+                "created_at": row.created_at.isoformat(),
+                "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                "player_color": row.player_color,
+                "engine_elo": row.engine_elo,
+                "result": row.result,
+                "result_reason": row.result_reason,
+                "move_count": move_counts.get(row.id, 0),
+                "analyzed_at": row.analyzed_at.isoformat() if row.analyzed_at else None,
+                "player_accuracy": row.player_accuracy,
+                "blunders": row.blunders,
+                "mistakes": row.mistakes,
+                "inaccuracies": row.inaccuracies,
+            }
+            for row in rows
+        ]
+
+    return {"items": items, "page": page, "per_page": per_page, "total": total}
+
+@app.get("/game/{game_id}/replay")
+def game_replay(game_id: str):
+    """Sequenza di FEN per il replay. Usa moves.fen_before (già persistito per
+    ply, vedi Fase 3) per ogni posizione intermedia — nessuna ri-simulazione —
+    più la posizione finale, ricostruita da _get_game (stessa logica di
+    cache-hit/miss condivisa con GET /game/{id}, non duplicata qui)."""
+    game = _get_game(game_id)  # 404 se non esiste, gestisce anche il cache-miss
+    with session_scope() as db:
+        move_rows = (
+            db.execute(select(Move).where(Move.game_id == game_id).order_by(Move.ply))
+            .scalars()
+            .all()
+        )
+        moves = [
+            {"ply": m.ply, "uci": m.uci, "san": m.san, "think_ms": m.think_ms}
+            for m in move_rows
+        ]
+        fens = [m.fen_before for m in move_rows]
+
+    fens.append(game["board"].fen())
+    return {"fens": fens, "moves": moves, "pgn": _build_pgn(game)}
+
+@app.delete("/game/{game_id}")
+def delete_game(game_id: str):
+    """Cancella la partita: la riga games + cascade DB (moves/analysis_results/
+    puzzles/srs_cards, ON DELETE CASCADE con foreign_keys=ON, vedi db.py) e
+    l'eviction dalla cache in-memory, così una richiesta in-flight non può
+    resuscitare una partita appena cancellata leggendola dalla cache."""
+    with session_scope() as db:
+        row = db.get(Game, game_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Game not found")
+        db.delete(row)
+    games.pop(game_id, None)
+    return {"deleted": True, "game_id": game_id}
+
+@app.post("/games/import")
+def import_game(req: ImportPgnRequest):
+    """Importa una partita da PGN esterno (source='import'). Rigioca la
+    mainline in una board fresca, persistendo una riga moves per ply (stesso
+    shape del loop live: color/uci/san/fen_before, ma think_ms=NULL — nessun
+    dato di timing reale per una partita non giocata qui). Nessuna analisi
+    automatica: resta una chiamata esplicita e separata a /game/analyze.
+
+    Convenzioni per un import (nessun vero "player" locale in una partita
+    esterna, ma games.player_color/engine_elo non sono nullable):
+    - player_color: sempre 'white'. Puramente convenzionale — determina solo a
+      quale lato /game/analyze attribuisce blunder/mistake/accuracy se lo si
+      analizza in seguito.
+    - engine_elo: sentinella 0 ("avversario sconosciuto/importato"), scelta
+      invece di NULL per non alterare lo schema Fase 1 (colonna NOT NULL)."""
+    parsed = chess.pgn.read_game(io.StringIO(req.pgn))
+    if parsed is None or parsed.errors:
+        raise HTTPException(status_code=400, detail="Invalid PGN")
+
+    start_fen = None
+    try:
+        board = chess.Board(parsed.headers["FEN"]) if parsed.headers.get("FEN") else chess.Board()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid start FEN in PGN headers")
+    if parsed.headers.get("FEN"):
+        start_fen = board.fen()
+
+    move_objects: list[chess.Move] = []
+    move_rows: list[dict] = []
+    ply = 0
+    for move in parsed.mainline_moves():
+        ply += 1
+        if move not in board.legal_moves:
+            raise HTTPException(status_code=400, detail=f"Illegal move at ply {ply} in PGN")
+        fen_before = board.fen()
+        san = board.san(move)
+        color = "white" if board.turn == chess.WHITE else "black"
+        board.push(move)
+        move_objects.append(move)
+        move_rows.append({
+            "ply": ply,
+            "color": color,
+            "uci": move.uci(),
+            "san": san,
+            "fen_before": fen_before,
+            "think_ms": None,
+        })
+
+    # chess.pgn.read_game() è tollerante: testo non-PGN produce comunque un
+    # Game valido (senza errors) ma a zero mosse — è così che rileviamo un
+    # input spazzatura/vuoto, non tramite `parsed.errors` (spesso vuoto anche
+    # per garbage in input).
+    if not move_rows:
+        raise HTTPException(status_code=400, detail="PGN contains no moves")
+
+    game_id = _new_game_id()
+    created_at = utcnow()
+    player_color = "white"
+    engine_elo = 0  # sentinella "avversario sconosciuto" per un import, vedi docstring
+
+    game = {
+        "board": board,
+        "player_color": player_color,
+        "engine_elo": engine_elo,
+        "move_objects": move_objects,
+        "last_engine_move": None,
+        "created_at": created_at.strftime("%Y.%m.%d"),
+        "start_fen": start_fen,
+    }
+
+    over = _check_game_over(board)
+    with session_scope() as db:
+        db.add(Game(
+            id=game_id,
+            player_color=player_color,
+            engine_elo=engine_elo,
+            start_fen=start_fen,
+            source="import",
+            pgn=_build_pgn(game),
+            created_at=created_at,
+            result=over["result"] if over else None,
+            result_reason=over["reason"] if over else None,
+            finished_at=created_at if over else None,
+        ))
+        for mv in move_rows:
+            db.add(Move(game_id=game_id, created_at=created_at, **mv))
+
+    games[game_id] = game
+
+    state = _board_to_state(game_id, game)
+    state["source"] = "import"
+    return state
+
+@app.get("/stats/summary")
+def stats_summary(
+    color: str | None = Query(default=None, pattern=r"^(white|black)$"),
+    source: str | None = Query(default=None),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+):
+    """Numeri di riepilogo su tutto lo storico persistito (filtrabile per colore,
+    range date su created_at, source). Convenzioni condivise con GET /games:
+    win/loss/draw relativi a player_color, source default 'play'.
+
+    - I *tassi* win/loss/draw sono relativi alle sole partite DECISE (con result
+      non nullo): le partite in corso non hanno esito e non devono diluire il
+      denominatore.
+    - avg_accuracy media games.player_accuracy solo sulle partite ANALIZZATE
+      (analyzed_at IS NOT NULL): le non analizzate non hanno accuracy e vanno
+      escluse, non contate come 0.
+    - avg_think_ms_per_move è calcolata sulle sole mosse DEL PLAYER (color ==
+      player_color della partita) con think_ms non nullo — riflette il tempo di
+      riflessione dell'utente, non quello dell'engine."""
+    dt_from, dt_to = _parse_date_range(date_from, date_to)
+    conds = _game_filter_conditions(color, source, dt_from, dt_to)
+
+    with session_scope() as db:
+        rows = db.execute(select(Game).where(*conds)).scalars().all()
+
+        total_games = len(rows)
+        wins = losses = draws = 0
+        for row in rows:
+            outcome = _player_result(row.player_color, row.result)
+            if outcome == "win":
+                wins += 1
+            elif outcome == "loss":
+                losses += 1
+            elif outcome == "draw":
+                draws += 1
+        decided = wins + losses + draws
+
+        analyzed = [r for r in rows if r.analyzed_at is not None]
+        avg_accuracy = (
+            round(sum(r.player_accuracy for r in analyzed) / len(analyzed), 1)
+            if analyzed
+            else None
+        )
+        total_blunders = sum(r.blunders or 0 for r in analyzed)
+        total_mistakes = sum(r.mistakes or 0 for r in analyzed)
+        total_inaccuracies = sum(r.inaccuracies or 0 for r in analyzed)
+
+        # Think time medio sulle sole mosse del player (join moves↔games sugli
+        # stessi filtri, color della mossa == player_color della partita).
+        avg_think_ms_row = db.execute(
+            select(func.avg(Move.think_ms))
+            .select_from(Move)
+            .join(Game, Move.game_id == Game.id)
+            .where(
+                *conds,
+                Move.color == Game.player_color,
+                Move.think_ms.isnot(None),
+            )
+        ).scalar_one()
+        avg_think_ms = round(avg_think_ms_row) if avg_think_ms_row is not None else None
+
+    def _rate(n: int) -> float:
+        return round(n / decided, 3) if decided else 0.0
+
+    return {
+        "total_games": total_games,
+        "decided_games": decided,
+        "analyzed_games": len(analyzed),
+        "wins": wins,
+        "losses": losses,
+        "draws": draws,
+        "win_rate": _rate(wins),
+        "loss_rate": _rate(losses),
+        "draw_rate": _rate(draws),
+        "avg_accuracy": avg_accuracy,
+        "total_blunders": total_blunders,
+        "total_mistakes": total_mistakes,
+        "total_inaccuracies": total_inaccuracies,
+        "avg_think_ms_per_move": avg_think_ms,
+    }
+
+@app.get("/stats/progress")
+def stats_progress(
+    color: str | None = Query(default=None, pattern=r"^(white|black)$"),
+    source: str | None = Query(default=None),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+):
+    """Serie temporale per il grafico di crescita (frontend Fase 3). Un punto per
+    partita DECISA, in ordine cronologico (created_at asc). Ogni punto porta un
+    ELO simulato — proxy direzionale del miglioramento, NON un rating rigoroso.
+
+    Algoritmo (vedi docs/growth-analytics.md): update Elo classico partita-per-
+    partita, con engine_elo come rating avversario e result (relativo a
+    player_color) come esito. K fisso, seed iniziale; il rating è riportato DOPO
+    l'applicazione di ogni partita. Le partite in corso (result nullo) sono
+    saltate; source default 'play' esclude gli import (engine_elo=0 sentinella li
+    renderebbe inutilizzabili come avversario)."""
+    dt_from, dt_to = _parse_date_range(date_from, date_to)
+    conds = _game_filter_conditions(color, source, dt_from, dt_to)
+
+    with session_scope() as db:
+        rows = db.execute(
+            select(Game).where(*conds).order_by(Game.created_at.asc(), Game.id.asc())
+        ).scalars().all()
+
+        series = []
+        current = float(SIM_ELO_SEED)
+        peak = float(SIM_ELO_SEED)
+        game_number = 0
+        for row in rows:
+            outcome = _player_result(row.player_color, row.result)
+            if outcome is None:
+                continue  # partita in corso / esito non canonico: non conteggiata
+            score = {"win": 1.0, "draw": 0.5, "loss": 0.0}[outcome]
+            expected = _elo_expected(current, row.engine_elo)
+            current = current + SIM_ELO_K * (score - expected)
+            peak = max(peak, current)
+            game_number += 1
+            series.append({
+                "game_id": row.id,
+                "date": row.created_at.isoformat(),
+                "game_number": game_number,
+                "engine_elo": row.engine_elo,
+                "result": outcome,
+                "score": score,
+                "simulated_elo": round(current),
+                "accuracy": (
+                    round(row.player_accuracy, 1)
+                    if row.player_accuracy is not None
+                    else None
+                ),
+            })
+
+    # Finestra recente: variazione ELO e accuracy media sulle ultime N partite.
+    window = SIM_ELO_RECENT_WINDOW
+    recent_slice = series[-window:]
+    if recent_slice:
+        pre_idx = len(series) - len(recent_slice) - 1
+        pre_elo = series[pre_idx]["simulated_elo"] if pre_idx >= 0 else SIM_ELO_SEED
+        recent_accs = [p["accuracy"] for p in recent_slice if p["accuracy"] is not None]
+        recent = {
+            "window": window,
+            "games": len(recent_slice),
+            "elo_change": recent_slice[-1]["simulated_elo"] - pre_elo,
+            "avg_accuracy": (
+                round(sum(recent_accs) / len(recent_accs), 1) if recent_accs else None
+            ),
+            "wins": sum(1 for p in recent_slice if p["result"] == "win"),
+            "losses": sum(1 for p in recent_slice if p["result"] == "loss"),
+            "draws": sum(1 for p in recent_slice if p["result"] == "draw"),
+        }
+    else:
+        recent = {
+            "window": window,
+            "games": 0,
+            "elo_change": 0,
+            "avg_accuracy": None,
+            "wins": 0,
+            "losses": 0,
+            "draws": 0,
+        }
+
+    return {
+        "seed_elo": SIM_ELO_SEED,
+        "k_factor": SIM_ELO_K,
+        "games_counted": len(series),
+        "current_elo": series[-1]["simulated_elo"] if series else SIM_ELO_SEED,
+        "peak_elo": round(peak),
+        "series": series,
+        "recent": recent,
     }

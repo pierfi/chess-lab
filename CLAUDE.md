@@ -98,23 +98,27 @@ Note tecniche:
 
 ---
 
-### 🔄 Fase 3 — Persistenza & storia (fondamenta completate)
+### 🔄 Fase 3 — Persistenza & storia (backend completato, resta il frontend)
 **Target: inizio-metà maggio 2026 · ~2 settimane · ~8 ore**
 
 Obiettivo: le partite sopravvivono al riavvio del server. Storico consultabile e replay.
 
-**Stato:** la fondazione di persistenza (schema completo delle 5 tabelle + migration Alembic iniziale + wiring `games`/`moves` su `/game/new` e `/game/move` con think time reale) è **completata**. Gli endpoint di storico/replay/delete/import restano da fare in una fase successiva (vedi checklist sotto).
+**Stato:** fondazione di persistenza + **tutti gli endpoint backend di storico/replay/delete/import/analisi + le statistiche aggregate (`/stats/summary`, `/stats/progress` con ELO simulato)** sono **completati** (11 luglio 2026, branch `feature/history-analytics-api`). Resta solo il frontend (pagina storico, replay con frecce, import PGN, grafico di crescita lato UI) in una fase successiva.
 
-**Nota:** l'**export** PGN (scaricare la partita corrente come `.pgn`) è stato anticipato l'11 luglio 2026, fuori roadmap — puro frontend, il backend genera già il PGN in ogni risposta di stato. Vedi [`docs/improvements.md`](docs/improvements.md). L'**import** PGN resta pianificato qui, sotto.
+**Nota (analytics anticipata):** le statistiche aggregate e l'ELO simulato erano originariamente a roadmap in Fase 5 ("Statistiche personali"); sono state anticipate qui perché leggono lo stesso storico persistito e completano la vista "storia" del backend in un colpo solo (consolidamento persistenza+analytics, vedi memoria progetto). Spec di design autoritativa in [`docs/growth-analytics.md`](docs/growth-analytics.md).
+
+**Nota:** l'**export** PGN (scaricare la partita corrente come `.pgn`) è stato anticipato l'11 luglio 2026, fuori roadmap — puro frontend, il backend genera già il PGN in ogni risposta di stato. Vedi [`docs/improvements.md`](docs/improvements.md). L'**import** PGN ha ora il backend pronto (`POST /games/import`, vedi sotto); resta solo l'import lato UI.
 
 | Settimana | Attività | Ore stimate | Modello suggerito | Stato |
 |-----------|----------|-------------|-------------------|-------|
 | Sett. 5 mag | Schema SQLite + SQLAlchemy (5 tabelle) + migration Alembic iniziale | ~3 ore | Opus | ✅ fatto |
 | Sett. 5 mag | Write-through cache + persistenza `games`/`moves` con think time su `/game/new` e `/game/move`; `start_fen` su `NewGameRequest` | ~2 ore | Opus | ✅ fatto |
-| Sett. 5 mag | `GET /games` con paginazione, `DELETE /game/{id}` | ~1.5 ore | Sonnet | 🔲 da fare |
-| Sett. 12 mag | `GET /game/{id}/replay` (sequenza FEN) | ~1.5 ore | Sonnet | 🔲 da fare |
-| Sett. 12 mag | Persistenza risultati `/game/analyze` → `analysis_results` (colonne già presenti) | ~1 ora | Sonnet | 🔲 da fare |
-| Sett. 12 mag | Frontend: pagina storico, replay con frecce, import PGN | ~2 ore | Opus | 🔲 da fare |
+| Sett. 5 mag | `GET /games` con paginazione, `DELETE /game/{id}` | ~1.5 ore | Sonnet | ✅ fatto |
+| Sett. 12 mag | `GET /game/{id}/replay` (sequenza FEN) | ~1.5 ore | Sonnet | ✅ fatto |
+| Sett. 12 mag | Persistenza risultati `/game/analyze` → `analysis_results` (colonne già presenti) | ~1 ora | Sonnet | ✅ fatto |
+| Sett. 12 mag | Backend `POST /games/import` (parsing PGN esterno, non a roadmap in origine ma raggruppato qui perché stessa area di storico) | — | Sonnet | ✅ fatto |
+| Sett. 12 mag | Statistiche aggregate `GET /stats/summary` + `GET /stats/progress` con ELO simulato (anticipate da Fase 5 — vedi `docs/growth-analytics.md`) | ~3 ore | Opus | ✅ fatto |
+| Sett. 12 mag | Frontend: pagina storico, replay con frecce, import PGN, grafico di crescita | ~2 ore | Opus | 🔲 da fare |
 
 #### Schema DB reale (implementato)
 
@@ -156,6 +160,20 @@ Migration iniziale greenfield in `alembic/versions/` (`alembic upgrade head` dal
 - `.gitignore`: aggiunti `*.db`, `*.db-wal`, `*.db-shm` (il file SQLite è runtime, non versionato).
 - File DB configurabile via env var `CHESS_LAB_DB` (default `backend/chess_lab.db`); i test puntano a un DB temporaneo isolato (`conftest.py`).
 - `start_fen` esiste ora su `NewGameRequest` e sulla tabella `games`, pronto perché la fase drill-finali lo usi (`POST /training/endgames/{id}/start`); qui è validato (400 se FEN malformata) e propagato al `chess.Board` iniziale, ma nessun endpoint dedicato lo consuma ancora.
+
+#### Endpoint storico/replay/delete/import (implementati 11 luglio 2026)
+
+Tutti gli endpoint backend restanti della Fase 3 sono ora wired in `backend/main.py`. Dettagli non ovvi:
+
+- **`POST /game/analyze` — persistenza additiva.** La risposta al chiamante non cambia (stesso shape di prima). In più, `_persist_analysis()` fa l'upsert di una riga `analysis_results` per ply (unique `game_id`+`ply`: ri-analizzare la stessa partita aggiorna le righe, non le duplica) e aggiorna `games.analyzed_at`/`player_accuracy`/`blunders`/`mistakes`/`inaccuracies`. **Difensivo:** se la riga `games` non esiste (partita iniettata solo in cache, come nel test `test_analyze_mate_swing_clamped`) la persistenza fa no-op invece di far fallire la FK — comportamento preesistente dell'endpoint preservato.
+- **`GET /games`** — lista paginata/filtrata dal DB (non dalla cache, quindi funziona anche per partite non cache-hot). `result` (`win`/`loss`/`draw`) è **relativo a `player_color`**, non la stringa PGN grezza (`win` per il bianco ≠ `win` per il nero). `source` di default è **solo `'play'`** — i drill di finali e gli import restano fuori dallo storico partite a meno di richiederli esplicitamente. `move_count` è calcolato in blocco per l'intera pagina (una query `GROUP BY`, non N+1).
+- **`GET /game/{id}/replay`** — riusa `_get_game()` (stessa gestione cache-hit/miss/404 di `GET /game/{id}`, nessuna logica duplicata) e `_build_pgn()`; i FEN intermedi vengono da `moves.fen_before` (già persistito per ply in Fase 1, apposta per questo), zero ri-simulazione della board. L'ultimo FEN è la posizione finale da `game["board"]`.
+- **`DELETE /game/{id}`** — cancella la riga `games`; il cascade DB (`ON DELETE CASCADE` + `foreign_keys=ON`, vedi sopra) è stato **verificato in pratica con un test** (non assunto): `moves` e `analysis_results` spariscono davvero. Evict esplicito dalla cache in-memory (`games.pop`) così una richiesta in-flight non può resuscitare una partita appena cancellata leggendola dalla cache. 404 se la partita non esiste.
+- **`POST /games/import`** — `chess.pgn.read_game()` su un `io.StringIO(pgn)`. Rigioca la mainline in una `chess.Board` fresca, persistendo una riga `moves` per ply (stesso shape del loop live, `think_ms=NULL` — nessun dato di timing reale per una partita non giocata qui). **Nessuna analisi automatica** — resta una chiamata esplicita separata a `/game/analyze`. Convenzioni scelte (nessun vero "player" locale in un import, ma `player_color`/`engine_elo` non sono nullable sullo schema Fase 1):
+  - `player_color`: sempre `"white"` — convenzionale, determina solo a quale lato `/game/analyze` attribuisce blunder/mistake/accuracy se la partita importata viene poi analizzata.
+  - `engine_elo`: sentinella `0` ("avversario sconosciuto/importato"), scelta invece di `NULL` per non alterare lo schema Fase 1 (colonna `NOT NULL`, niente nuova migration).
+  - Validazione: `chess.pgn.read_game()` è tollerante — un testo non-PGN produce comunque un `Game` valido (senza `errors`) ma a **zero mosse**. La rilevazione di input spazzatura/vuoto passa quindi da "zero mosse nella mainline", non da `parsed.errors`.
+  - La partita importata viene subito messa in cache (`games[game_id] = ...`), quindi è immediatamente giocabile/analizzabile senza dover attendere un round-trip di cache-miss sul DB.
 
 ---
 
@@ -369,18 +387,126 @@ Response: {
 }
 ```
 
-### Endpoint da implementare in Fase 3 (Persistenza)
+### Endpoint Fase 3 (Persistenza) — implementati
 
 ```python
-# Lista partite
-GET /games?page=1&per_page=20&color=white&result=win
+# Lista paginata/filtrata delle partite (dal DB, non dalla cache in-memory).
+# result è relativo a player_color, non alla stringa PGN grezza:
+#   win  → (player_color=white AND games.result='1-0') OR (player_color=black AND games.result='0-1')
+#   loss → l'inverso
+#   draw → games.result='1/2-1/2'
+# source di default: SOLO 'play' (endgame_drill/import esclusi se non richiesti esplicitamente).
+GET /games?page=1&per_page=20&color=white&result=win&source=play
+Response: {
+  "items": [
+    {
+      "game_id": "6f0610a7",
+      "created_at": "2026-07-11T10:00:00",
+      "finished_at": "2026-07-11T10:05:00" | null,
+      "player_color": "white",
+      "engine_elo": 1000,
+      "result": "1-0" | null,
+      "result_reason": "checkmate" | null,
+      "move_count": 24,
+      "analyzed_at": "2026-07-11T10:06:00" | null,
+      "player_accuracy": 78.5 | null,
+      "blunders": 1 | null,
+      "mistakes": 2 | null,
+      "inaccuracies": 3 | null
+    }
+  ],
+  "page": 1,
+  "per_page": 20,
+  "total": 42
+}
 
-# Replay (sequenza di FEN)
+# Replay: sequenza di FEN (da moves.fen_before + posizione finale), mosse e PGN.
 GET /game/{id}/replay
-# → {"fens": [...], "moves": [...], "pgn": "..."}
+Response: {
+  "fens": ["rnbqkbnr/.../8 w KQkq - 0 1", "...", ...],   # N mosse + 1 (posizione finale)
+  "moves": [
+    { "ply": 1, "uci": "e2e4", "san": "e4", "think_ms": 850 }
+  ],
+  "pgn": "[Event ...]"
+}
 
-# Cancella partita
+# Cancella partita: riga games + cascade DB su moves/analysis_results/puzzles/
+# srs_cards (ON DELETE CASCADE, verificato in pratica) + eviction dalla cache.
 DELETE /game/{id}
+Response: { "deleted": true, "game_id": "6f0610a7" }
+# 404 se la partita non esiste.
+
+# Import PGN esterno. Nessuna analisi automatica (resta una chiamata separata
+# a /game/analyze). Convenzioni: player_color sempre "white" (nessun vero
+# "player" locale in un import), engine_elo sentinella 0 ("sconosciuto").
+POST /games/import
+Body: { "pgn": "[Event ...]\n\n1. e4 e5 2. Nf3 ..." }
+Response:  # stesso shape di board_to_state (GET /game/{id}) + "source"
+{
+  "game_id": "a1b2c3d4",
+  "fen": "...",
+  "pgn": "...",
+  "turn": "white" | "black",
+  "is_check": false,
+  "is_game_over": false,
+  "result": null,
+  "last_engine_move": null,
+  "move_history": ["e2e4", "e7e5", ...],
+  "move_history_san": ["e4", "e5", ...],
+  "player_color": "white",
+  "engine_elo": 0,
+  "source": "import"
+}
+# 400 se il PGN è vuoto/senza mosse o non parsabile.
+```
+
+Persistenza analisi (additiva, non cambia la risposta esistente di `/game/analyze`):
+upsert per-ply in `analysis_results` (unique `game_id`+`ply`, idempotente) +
+aggiornamento di `games.analyzed_at`/`player_accuracy`/`blunders`/`mistakes`/`inaccuracies`.
+
+### Statistiche aggregate Fase 3 (`/stats/*`) — implementati
+
+Aggregazioni read-only su tutto lo storico persistito (dal DB, non dalla cache),
+per la vista "sto migliorando?". Filtri condivisi con `GET /games` (fonte unica:
+`_result_predicate`/`_player_result`/`_game_filter_conditions` in `main.py`):
+`color`, `source` (default `play` — import/drill esclusi), `date_from`/`date_to`
+(`YYYY-MM-DD` su `created_at`, `date_to` inclusivo del giorno intero; `400` se
+formato errato). Spec autoritativa: [`docs/growth-analytics.md`](docs/growth-analytics.md).
+
+```python
+# Numeri headline. I tassi sono relativi alle partite DECISE (result non nullo);
+# avg_accuracy media games.player_accuracy SOLO sulle partite analizzate
+# (analyzed_at IS NOT NULL); avg_think_ms_per_move è sulle sole mosse del player
+# (moves.color == games.player_color). null dove non c'è dato.
+GET /stats/summary?color=white&source=play&date_from=2026-05-01&date_to=2026-05-31
+Response: {
+  "total_games": 42, "decided_games": 40, "analyzed_games": 30,
+  "wins": 22, "losses": 15, "draws": 3,
+  "win_rate": 0.55, "loss_rate": 0.375, "draw_rate": 0.075,
+  "avg_accuracy": 76.4 | null,
+  "total_blunders": 18, "total_mistakes": 41, "total_inaccuracies": 63,
+  "avg_think_ms_per_move": 4200 | null
+}
+
+# Serie temporale per il grafico di crescita (frontend Fase 3). Un punto per
+# partita DECISA in ordine cronologico, con ELO SIMULATO: update Elo classico
+# (K=32, seed 1200) con engine_elo come rating avversario e result relativo a
+# player_color come esito — proxy DIREZIONALE, non un rating rigoroso. simulated_elo
+# è il rating DOPO la partita. In corso saltate; import esclusi (engine_elo=0).
+GET /stats/progress?color=white&source=play
+Response: {
+  "seed_elo": 1200, "k_factor": 32, "games_counted": 40,
+  "current_elo": 1287, "peak_elo": 1310,
+  "series": [
+    { "game_id": "6f0610a7", "date": "2026-07-11T10:00:00", "game_number": 1,
+      "engine_elo": 1000, "result": "win", "score": 1.0,
+      "simulated_elo": 1214, "accuracy": 78.5 | null }
+  ],
+  "recent": {
+    "window": 10, "games": 10, "elo_change": 45,
+    "avg_accuracy": 74.2 | null, "wins": 6, "losses": 3, "draws": 1
+  }
+}
 ```
 
 ### Endpoint da implementare in Fase 4 (Allenamento mirato)
