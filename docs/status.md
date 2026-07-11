@@ -23,9 +23,12 @@ Ultimo aggiornamento: **11 luglio 2026** (sessione in pausa per limite di utiliz
 | `feature/history-growth-ui` | ✅ **Merged in `main`** (PR #9) | Fase 3 frontend completa: pannello Storico (lista/filtri/replay/delete/import PGN) + dashboard Crescita (grafici ELO simulato/accuracy via `buildTrendChartSvg()`, stesso stile di `buildEvalChartSvg()`). 68/68 test backend verdi, verificato live via jsdom (no browser disponibile in sandbox). |
 | `feature/training-backend` | ✅ **Merged in `main`** (PR #10) | Fase 4 backend completa: `GET/POST /training/puzzles/*` (SRS SM-2 semplificato), `GET /training/weaknesses` (fase/tema), `GET /training/endgames` + `start` (drill finali, `start_fen`). Design in `docs/training-mode.md`. 93/93 test verdi. Fix collaterale: `_create_new_game` ora deriva il turno iniziale da `board.turn` invece di assumere sempre la posizione standard (necessario per i drill con `start_fen` custom). |
 
+| `feature/training-ui` | 🔄 **In corso** (agente Fable) | Fase 5 frontend (ultima fase): pannello Allenamento — puzzle solver (`GET/POST /training/puzzles/*`), dashboard debolezze (`GET /training/weaknesses`), selezione drill finali (`GET /training/endgames` + `start`). Worktree: `.claude/worktrees/training-ui`. Non tocca il backend. |
+
 ## Prossimi passi, in ordine
 
-1. Fase 3 e Fase 4 completate e mergiate — Fase 5 (`feature/training-ui`) sbloccata, in avvio.
+1. Attendere fine `feature/training-ui` (Fable) — verificare (test, no co-author trailer, working tree pulito) e push.
+2. Con Fase 5 completa, l'iniziativa persistenza + storia + allenamento a 5 fasi è **conclusa**.
 
 ## Da non dimenticare
 
