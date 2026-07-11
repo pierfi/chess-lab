@@ -21,12 +21,11 @@ Ultimo aggiornamento: **11 luglio 2026** (sessione in pausa per limite di utiliz
 | `feature/persistence-db` | ✅ **Merged in `main`** (PR #7) | Fase 1 (persistenza SQLite): schema 5 tabelle, write-through cache, `think_ms`. Base per tutte le fasi successive. |
 | `feature/history-analytics-api` | ✅ **Merged in `main`** (PR #8) | Fase 2 completa: metà "reads" (Sonnet: `GET /games`, `/replay`, `DELETE`, `POST /games/import`, persistenza in `/game/analyze`) + metà stats/ELO simulato (Opus: `GET /stats/summary`, `GET /stats/progress`, algoritmo documentato in `docs/growth-analytics.md`). 68/68 test verdi. |
 | `feature/history-growth-ui` | ✅ **Merged in `main`** (PR #9) | Fase 3 frontend completa: pannello Storico (lista/filtri/replay/delete/import PGN) + dashboard Crescita (grafici ELO simulato/accuracy via `buildTrendChartSvg()`, stesso stile di `buildEvalChartSvg()`). 68/68 test backend verdi, verificato live via jsdom (no browser disponibile in sandbox). |
-| `feature/training-backend` | 🔄 **In corso** (agente Opus, in parallelo) | Fase 4 backend: `GET/POST /training/puzzles/*` (SRS SM-2 semplificato), `GET /training/weaknesses` (fase/tema), `GET /training/endgames` + `start` (drill finali, `start_fen`). Design completo in `docs/training-mode.md`. Worktree: `.claude/worktrees/training-backend`. Non tocca il frontend — nessuna sovrapposizione di file con `feature/history-growth-ui`, lanciati in parallelo perché indipendenti (dipendono solo da Fase 1+2, già mergiate). |
+| `feature/training-backend` | ✅ **Merged in `main`** (PR #10) | Fase 4 backend completa: `GET/POST /training/puzzles/*` (SRS SM-2 semplificato), `GET /training/weaknesses` (fase/tema), `GET /training/endgames` + `start` (drill finali, `start_fen`). Design in `docs/training-mode.md`. 93/93 test verdi. Fix collaterale: `_create_new_game` ora deriva il turno iniziale da `board.turn` invece di assumere sempre la posizione standard (necessario per i drill con `start_fen` custom). |
 
 ## Prossimi passi, in ordine
 
-1. Attendere fine `feature/history-growth-ui` (Fable) e `feature/training-backend` (Opus) — lanciati in parallelo, verificare ciascuno in autonomia (test, no co-author trailer, working tree pulito) al completamento, poi push.
-2. Dopo Fase 4: Fase 5 (`feature/training-ui`, dipende da Fase 3 **e** Fase 4 — non può partire finché entrambe non sono pronte).
+1. Fase 3 e Fase 4 completate e mergiate — Fase 5 (`feature/training-ui`) sbloccata, in avvio.
 
 ## Da non dimenticare
 
