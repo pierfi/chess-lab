@@ -5,6 +5,7 @@
 - `architecture.md` — Architettura del sistema (da creare in Fase 2)
 - `api.md` — Riferimento endpoint API
 - `bugs.md` — Bug tracker locale
+- `improvements.md` — Feature piccole fuori roadmap (richieste utente o proposte approvate)
 - `coach-mode.md` — Analisi di design per la modalità Coach (Fase 5)
 
 ## Risorse esterne utili

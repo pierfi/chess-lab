@@ -611,6 +611,10 @@ body {
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.5-4.5"/></svg>
           Analizza
         </button>
+        <button id="btn-export" title="Esporta PGN della partita corrente" onclick="downloadPgn()" disabled>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4-4M12 15l4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          Esporta PGN
+        </button>
       </div>
       <div class="hint-panel" id="hint-panel"></div>
       <div class="move-list" id="move-list"></div>
@@ -675,6 +679,7 @@ let state = {
   lastMove: null,
   moveHistory: [],
   moveHistorySan: [],
+  pgn: null,               // ultima stringa PGN ricevuta dal backend
   isGameOver: false,
   isCheck: false,
   turn: 'white',
@@ -1223,6 +1228,8 @@ function updateState(data) {
   state.isCheck = data.is_check || false;
   state.moveHistory = data.move_history;
   state.moveHistorySan = data.move_history_san || [];
+  state.pgn = data.pgn || null;
+  updateExportButton();
 
   if (data.move_history.length >= 1) {
     const lastUci = data.move_history[data.move_history.length - 1];
@@ -1246,6 +1253,26 @@ function updateState(data) {
 
   if (state.assisted) fetchHint();
   else renderHintUI();
+}
+
+// ---------- Export PGN ----------
+
+function updateExportButton() {
+  const btn = document.getElementById('btn-export');
+  btn.disabled = !state.pgn || state.moveHistory.length === 0;
+}
+
+function downloadPgn() {
+  if (!state.pgn) return;
+  const blob = new Blob([state.pgn], { type: 'application/x-chess-pgn' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `chesslab-${state.gameId || 'game'}.pgn`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function renderMoveList() {
@@ -1368,6 +1395,8 @@ async function startGame() {
   state.selectedSq = null;
   state.legalMoves = [];
   state.lastMove = null;
+  state.pgn = null;
+  updateExportButton();
   state.isGameOver = false;
   state.isCheck = false;
   hintSeq++;               // invalidate any in-flight hint from the previous game

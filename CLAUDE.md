@@ -108,6 +108,8 @@ Obiettivo: le partite sopravvivono al riavvio del server. Storico consultabile e
 | Sett. 12 mag | `GET /game/{id}/replay` (sequenza FEN) | ~1.5 ore | Sonnet |
 | Sett. 12 mag | Frontend: pagina storico, replay con frecce, import PGN | ~2 ore | Opus |
 
+**Nota:** l'**export** PGN (scaricare la partita corrente come `.pgn`) è stato anticipato l'11 luglio 2026, fuori roadmap — puro frontend, il backend genera già il PGN in ogni risposta di stato. Vedi [`docs/improvements.md`](docs/improvements.md). L'**import** PGN resta pianificato qui, sopra.
+
 Tabelle DB:
 - `games` — id, player_color, engine_elo, result, created_at, pgn
 - `moves` — id, game_id, ply, uci, san, created_at
