@@ -239,6 +239,35 @@ class TestHint:
         r = client.post(f"/game/{gid}/hint", json={"depth": 8})
         assert r.status_code == 400
 
+    def test_hint_with_hint_elo(self, client, white_game):
+        # hint_elo calibra la forza del suggerimento: stessa shape di risposta,
+        # mosse comunque legali nella posizione corrente
+        gid = white_game["game_id"]
+        r = client.post(f"/game/{gid}/hint", json={"depth": 8, "hint_elo": 800})
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["lines"]) == 3
+        board = chess.Board(white_game["fen"])
+        legal_ucis = {m.uci() for m in board.legal_moves}
+        for line in data["lines"]:
+            assert line["move_uci"] in legal_ucis
+            assert isinstance(line["score_cp"], int)
+        assert data["eval_cp"] == data["lines"][0]["score_cp"]
+
+    def test_hint_elo_out_of_range(self, client, white_game):
+        gid = white_game["game_id"]
+        r = client.post(f"/game/{gid}/hint", json={"depth": 8, "hint_elo": 100})
+        assert r.status_code == 422
+        r = client.post(f"/game/{gid}/hint", json={"depth": 8, "hint_elo": 3000})
+        assert r.status_code == 422
+
+    def test_hint_elo_null_is_default(self, client, white_game):
+        # hint_elo esplicitamente null = campo omesso = piena forza
+        gid = white_game["game_id"]
+        r = client.post(f"/game/{gid}/hint", json={"depth": 8, "hint_elo": None})
+        assert r.status_code == 200
+        assert len(r.json()["lines"]) == 3
+
     def test_hint_does_not_alter_state(self, client, white_game):
         gid = white_game["game_id"]
         client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})

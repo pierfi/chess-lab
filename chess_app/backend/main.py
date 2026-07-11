@@ -98,6 +98,9 @@ class AnalyzeRequest(BaseModel):
 class HintRequest(BaseModel):
     multipv: int = Field(default=3, ge=1, le=5)
     depth: int = Field(default=16, ge=1, le=20)
+    # Forza dell'hint engine espressa come ELO (stessa scala dell'avversario).
+    # None = piena forza, comportamento storico: nessuno Skill Level configurato.
+    hint_elo: int | None = Field(default=None, ge=400, le=2800)
 
 class ImportPgnRequest(BaseModel):
     pgn: str
@@ -514,9 +517,15 @@ def game_hint(game_id: str, req: HintRequest):
     if board.is_game_over():
         raise HTTPException(status_code=400, detail="Game is already over")
 
-    # Hint-engine separato dal play-engine, a piena forza: nessuno Skill Level
-    # configurato, indipendente dall'ELO scelto per la partita.
+    # Hint-engine separato dal play-engine, indipendente dall'ELO scelto per la
+    # partita. Default (hint_elo omesso): piena forza, nessuno Skill Level
+    # configurato — comportamento storico invariato. Con hint_elo il suggerimento
+    # viene calibrato al livello richiesto riusando lo stesso mapping ELO→Skill
+    # dell'avversario (solo lo Skill Level: la depth resta governata da req.depth).
     with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+        if req.hint_elo is not None:
+            skill, _ = elo_to_skill_depth(req.hint_elo)
+            engine.configure({"Skill Level": skill})
         infos = engine.analyse(board, chess.engine.Limit(depth=req.depth), multipv=req.multipv)
 
     # Con multipv impostato analyse() ritorna una lista di info (anche per multipv=1)

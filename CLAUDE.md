@@ -85,12 +85,14 @@ Partita "assistita" — un secondo Stockfish (analysis engine, separato da quell
 - [x] Frontend: overlay SVG per frecce sulla board (mappatura casella→coordinate coerente con la rotazione per il nero, `sqToXY()` inverso di `sqName()`) + eval bar verticale live con anti-race (`hintSeq`)
 - [x] Restyling UI stile Lichess: modal impostazioni partita, tema chiaro, toolbar compatta, coordinate dentro le caselle di bordo
 
+**Nota (post-completamento):** l'11 luglio 2026 è stata aggiunta, fuori roadmap, la **forza regolabile dell'hint engine** — `hint_elo` opzionale su `POST /game/{id}/hint` (stessa scala ELO dell'avversario, riusa `elo_to_skill_depth()` per il solo Skill Level) + selettore frontend visibile solo in modalità assistita. Default invariato: campo omesso = piena forza. Approfondisce Fase 2 senza modificarne il perimetro. Vedi [`docs/improvements.md`](docs/improvements.md).
+
 Note tecniche:
 - L'engine "assist" è un'istanza separata da quella che gioca contro il player (coerente con il vincolo "un'istanza Stockfish per chiamata API, nessun engine globale").
 - MultiPV per ottenere le top N mosse candidate, non solo la migliore.
 - La mossa suggerita non viene mai giocata automaticamente: resta una sovrapposizione visiva, l'utente sceglie sempre la mossa.
 - Nessuna IA/LLM coinvolta in questa fase — è puro output Stockfish. Il coach AI-based (Claude) resta pianificato separatamente in Fase 7.
-- **Hint-engine a piena forza**: NON deve ereditare `elo_to_skill_depth` del play-engine — va configurato senza Skill Level limitato (o Skill 20), altrimenti i suggerimenti sarebbero deboli/incoerenti col resto dell'app.
+- **Hint-engine a piena forza per default**: NON eredita mai l'ELO del play-engine. Senza `hint_elo` nessuno Skill Level viene configurato (piena forza, comportamento storico). Dall'11 luglio 2026 l'utente può opzionalmente calibrare la forza dei suggerimenti con `hint_elo` (vedi nota sopra) — scelta esplicita, mai implicita.
 - **Anti-latenza**: a depth 16 con MultiPV=3, `/hint` costa ~1-2s a chiamata. Va invocato on-demand (bottone/toggle esplicito) o con debounce — mai automaticamente dopo ogni mossa, per non raddoppiare l'attesa già presente per la mossa del play-engine.
 - **Coerenza dati, non engine**: gli endpoint FastAPI restano sincroni (`def`) e girano nel threadpool, quindi `/hint` e `/game/move` possono sovrapporsi sullo stesso `games[game_id]["board"]`. I due processi Stockfish sono isolati e va bene, ma `/hint` può leggere un FEN che sta per essere superato da una `push()` concorrente. Impatto basso (l'hint non muta stato), da tenere presente se emergono risposte stale.
 
@@ -369,7 +371,9 @@ loss <  -10  → excellent
 ```python
 # Hint live: analysis engine separato (MultiPV), non tocca lo stato partita
 POST /game/{id}/hint
-Body: { "multipv": 3, "depth": 16 }
+Body: { "multipv": 3, "depth": 16, "hint_elo": 1300 }
+# hint_elo opzionale (400–2800): calibra la forza del suggerimento (solo Skill
+# Level, la depth resta req.depth). Omesso/null = piena forza (default).
 Response: {
   "eval_cp": 34,               # dal punto di vista del bianco
   "lines": [
@@ -518,7 +522,7 @@ let state = {
 - Indice `i` (0–63) → nome casella dipende da `state.playerColor`
 - Bianco: riga 0 = rank 8, col 0 = file a → `sqName(i)` restituisce es. "a8" per i=0
 - Nero: board ruotata, riga 0 = rank 1, col 0 = file h
-- Pezzi: Unicode (`♔♕♖♗♘♙` / `♚♛♜♝♞♟`)
+- Pezzi: asset SVG statici, set "Cburnett" di Lichess (`frontend/pieces/*.svg`, 12 file — vedi `pieces/NOTICE.md` per licenza/provenienza). Non più glifi Unicode: la resa a font-dipendeva dal sistema dell'utente e non garantiva colori distinguibili (`docs/bugs.md` Bug #6, fix v1/v2 insufficienti, fix v3 risolutivo l'11 luglio 2026). Mappa carattere FEN → file in `PIECE_FILES`, creazione `<img>` via `pieceImg(fenChar)`, usata da `renderBoard()` e `askPromotion()`.
 
 **CSS variables principali:**
 ```css
@@ -638,6 +642,7 @@ curl -s -X POST http://localhost:8765/game/new \
 - Lingua commenti: italiano per commenti architetturali/business, inglese per commenti tecnici inline.
 - Nessuna dipendenza npm/yarn. Se serve una libreria JS in futuro, usare CDN via `<script>`.
 - Il progetto è educational/locale: nessuna auth, nessun rate limiting, nessun deploy cloud per ora.
+- **Regola ferrea sui commit: MAI includere una riga `Co-Authored-By: Claude ...` (o equivalente) nei messaggi di commit.** Vale per ogni sessione, ogni subagent (Fable, Sonnet, Opus, ecc.) e ogni branch/worktree di questo repo, senza eccezioni.
 
 ---
 

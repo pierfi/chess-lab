@@ -125,40 +125,21 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 42px;
   line-height: 1;
   cursor: pointer;
   position: relative;
   user-select: none;
-  /* Font esplicito per i glifi scacchistici Unicode (U+2654-265F).
-     'sans-serif' generico può risolvere, a seconda del sistema, in un font
-     senza distinzione outline/solid tra il set "white" e "black", con il
-     risultato che i pezzi appaiono con colori invertiti o indistinguibili.
-     Questi font hanno un rendering verificato e coerente con la convenzione
-     Unicode (outline = pezzo bianco, solid = pezzo nero). */
-  font-family: 'Noto Sans Symbols2', 'DejaVu Sans', 'Segoe UI Symbol', 'Arial Unicode MS', sans-serif;
 }
 
-/* Pezzi bianchi: fill chiaro + contorno scuro netto, leggibili anche su casella chiara.
-   -webkit-text-stroke per il bordo vero; le 8 ombre dure a 1px sono il fallback
-   per renderer che ignorano text-stroke. */
-.square.white-piece {
-  color: #fff;
-  -webkit-text-stroke: 1.2px #3a3a3a;
-  text-shadow:
-    -1px -1px 0 #3a3a3a,  0 -1px 0 #3a3a3a,  1px -1px 0 #3a3a3a,
-    -1px  0   0 #3a3a3a,                     1px  0   0 #3a3a3a,
-    -1px  1px 0 #3a3a3a,  0  1px 0 #3a3a3a,  1px  1px 0 #3a3a3a;
-}
-
-/* Pezzi neri: stessa tecnica con contorno chiaro sottile, per staccare dalla casella scura */
-.square.black-piece {
-  color: #222;
-  -webkit-text-stroke: 0.8px #f5f0e6;
-  text-shadow:
-    -1px -1px 0 rgba(245,240,230,0.85),  0 -1px 0 rgba(245,240,230,0.85),  1px -1px 0 rgba(245,240,230,0.85),
-    -1px  0   0 rgba(245,240,230,0.85),                                    1px  0   0 rgba(245,240,230,0.85),
-    -1px  1px 0 rgba(245,240,230,0.85),  0  1px 0 rgba(245,240,230,0.85),  1px  1px 0 rgba(245,240,230,0.85);
+/* Pezzi come veri asset SVG (set Cburnett di Lichess, vedi frontend/pieces/ e
+   docs/bugs.md Bug #6 fix v3): il colore bianco/nero è nel file stesso, non più
+   affidato a un fill CSS su un glifo Unicode dipendente dal font di sistema. */
+.piece-img {
+  width: 80%;
+  height: 80%;
+  display: block;
+  pointer-events: none;
+  user-select: none;
 }
 
 .square.white { background: var(--white-sq); }
@@ -237,6 +218,26 @@ body {
 .toolbar button.active { background: rgba(98, 153, 36, 0.14); color: var(--accent); }
 .toolbar button:disabled { opacity: 0.5; cursor: default; }
 .toolbar button svg { flex-shrink: 0; }
+
+/* Selettore forza dell'hint engine — visibile solo in modalità assistita.
+   Riusa il pattern .strength-row del modal setup, in versione compatta. */
+.hint-strength {
+  display: none;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.hint-strength-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.hint-strength .strength-row button {
+  padding: 5px 0;
+  font-size: 12px;
+}
 
 .hint-panel {
   display: none;
@@ -617,15 +618,17 @@ body {
 }
 
 .promo-piece {
-  font-size: 48px;
   cursor: pointer;
   padding: 8px 14px;
   border-radius: 8px;
   transition: background 0.15s;
-  /* Stesso font stack di .square: qui non c'è nemmeno la colorazione CSS
-     white-piece/black-piece a fare da rete di sicurezza, quindi un font
-     coerente outline/solid è ancora più importante per distinguere le scelte. */
-  font-family: 'Noto Sans Symbols2', 'DejaVu Sans', 'Segoe UI Symbol', 'Arial Unicode MS', sans-serif;
+}
+
+.promo-piece img {
+  width: 48px;
+  height: 48px;
+  display: block;
+  pointer-events: none;
 }
 
 .promo-piece:hover { background: rgba(98, 153, 36, 0.2); }
@@ -676,6 +679,10 @@ body {
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M12 15l-4-4M12 15l4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
           Esporta PGN
         </button>
+      </div>
+      <div class="hint-strength" id="hint-strength">
+        <div class="hint-strength-label">Forza suggerimenti</div>
+        <div class="strength-row" id="hint-strength-row"></div>
       </div>
       <div class="hint-panel" id="hint-panel"></div>
       <div class="move-list" id="move-list"></div>
@@ -749,17 +756,25 @@ let state = {
   assisted: false,        // toggle modalità assistita
   hint: null,             // ultima risposta di /game/{id}/hint
   hintLoading: false,
+  hintElo: null,          // forza hint engine (ELO); null = piena forza (default)
 };
 
-// Un solo set di glifi (quello "solid"/pieno, U+265A-265F) per entrambi i colori:
-// il set "outline" (U+2654-2659) rende come una figura sottile e vuota, che su un
-// fill CSS bianco lascia trasparente l'interno del glifo e mostra il colore della
-// casella sotto — con font di fallback inconsistenti sembra un pezzo invertito.
-// Il colore vero (bianco/nero) arriva solo da .white-piece/.black-piece in CSS.
-const PIECES = {
-  K: '♚', Q: '♛', R: '♜', B: '♝', N: '♞', P: '♟',
-  k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟',
+// Pezzi come veri asset SVG (set Cburnett di Lichess, frontend/pieces/*.svg),
+// non più glifi Unicode: nessuna dipendenza dal font di sistema per il colore
+// (vedi docs/bugs.md Bug #6 fix v3). Mappa carattere FEN -> nome file (senza estensione).
+const PIECE_FILES = {
+  K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
+  k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP',
 };
+
+function pieceImg(fenChar) {
+  const img = document.createElement('img');
+  img.className = 'piece-img';
+  img.src = `pieces/${PIECE_FILES[fenChar]}.svg`;
+  img.alt = fenChar;
+  img.draggable = false;
+  return img;
+}
 
 const FILES = 'abcdefgh';
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -939,15 +954,15 @@ function askPromotion(color) {
   return new Promise(resolve => {
     const box = document.getElementById('promo-box');
     const overlay = document.getElementById('promo-overlay');
-    // Stesso set di glifi "solid" della board (vedi PIECES): il colore vero
-    // arriva dalla classe .white-piece/.black-piece, non dal glifo stesso.
-    const pieces = [['♛','q'], ['♜','r'], ['♝','b'], ['♞','n']];
-    const colorClass = color === 'white' ? 'white-piece' : 'black-piece';
+    // Stesso set di asset SVG della board (vedi PIECE_FILES): il colore è nel
+    // file stesso, non serve più alcuna classe di colorazione CSS.
+    const pieces = [['Q','q'], ['R','r'], ['B','b'], ['N','n']];
+    const fenChar = color === 'white' ? (c => c.toUpperCase()) : (c => c.toLowerCase());
     box.innerHTML = '';
-    for (const [icon, code] of pieces) {
+    for (const [letter, code] of pieces) {
       const el = document.createElement('span');
-      el.className = 'promo-piece ' + colorClass;
-      el.textContent = icon;
+      el.className = 'promo-piece';
+      el.appendChild(pieceImg(fenChar(letter)));
       el.onclick = () => { overlay.classList.remove('visible'); resolve(code); };
       box.appendChild(el);
     }
@@ -987,9 +1002,7 @@ function renderBoard() {
 
     const piece = pieceMap[sq];
     if (piece) {
-      div.textContent = PIECES[piece];
-      if (piece === piece.toLowerCase()) div.classList.add('black-piece');
-      else div.classList.add('white-piece');
+      div.appendChild(pieceImg(piece));
     }
 
     // Coordinate stile Lichess: rank sull'ultima colonna, file sull'ultima riga.
@@ -1045,11 +1058,15 @@ async function fetchHint() {
   const seq = ++hintSeq;
   state.hintLoading = true;
   renderHintUI();
+  // hint_elo omitted entirely when null: the backend treats a missing field
+  // as "full strength", the historical default behavior
+  const body = { multipv: 3, depth: 16 };
+  if (state.hintElo !== null) body.hint_elo = state.hintElo;
   try {
     const r = await fetch(`${API}/game/${state.gameId}/hint`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ multipv: 3, depth: 16 }),
+      body: JSON.stringify(body),
     });
     if (seq !== hintSeq) return;   // stale response, a newer request is in flight
     if (!r.ok) {
@@ -1075,6 +1092,44 @@ function renderHintUI() {
   updateEvalBar();
   renderArrows();
   renderHintPanel();
+  renderHintStrength();
+}
+
+// ---------- Forza dell'hint engine ----------
+
+// Selettore livelli: stessa scala STRENGTH_ELO dell'avversario + "Max" (piena
+// forza, hint_elo omesso nella richiesta) come default = comportamento storico
+function renderHintStrength() {
+  const wrap = document.getElementById('hint-strength');
+  wrap.style.display = state.assisted ? 'block' : 'none';
+  if (!state.assisted) return;
+  const row = document.getElementById('hint-strength-row');
+  row.innerHTML = '';
+  STRENGTH_ELO.forEach((elo, idx) => {
+    const btn = document.createElement('button');
+    btn.textContent = idx + 1;
+    btn.title = `Suggerimenti a livello ELO ${elo}`;
+    btn.classList.toggle('active', state.hintElo === elo);
+    btn.onclick = () => selectHintStrength(elo);
+    row.appendChild(btn);
+  });
+  const maxBtn = document.createElement('button');
+  maxBtn.textContent = 'Max';
+  maxBtn.title = 'Piena forza Stockfish (default)';
+  maxBtn.classList.toggle('active', state.hintElo === null);
+  maxBtn.onclick = () => selectHintStrength(null);
+  row.appendChild(maxBtn);
+}
+
+function selectHintStrength(elo) {
+  if (state.hintElo === elo) return;
+  state.hintElo = elo;
+  // Il suggerimento corrente è calcolato alla vecchia forza: azzerarlo mostra
+  // subito lo stato di caricamento (stesso pattern del toggle assistita).
+  // fetchHint() incrementa hintSeq, quindi ogni risposta in-flight alla
+  // vecchia forza viene scartata dal controllo anti-race esistente.
+  state.hint = null;
+  fetchHint();
 }
 
 // cp (white POV) -> % white fill; sigmoide per non saturare con pochi pedoni di vantaggio
