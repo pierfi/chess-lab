@@ -520,6 +520,7 @@ curl -s -X POST http://localhost:8765/game/new \
 - Lingua commenti: italiano per commenti architetturali/business, inglese per commenti tecnici inline.
 - Nessuna dipendenza npm/yarn. Se serve una libreria JS in futuro, usare CDN via `<script>`.
 - Il progetto è educational/locale: nessuna auth, nessun rate limiting, nessun deploy cloud per ora.
+- **Regola ferrea sui commit: MAI includere una riga `Co-Authored-By: Claude ...` (o equivalente) nei messaggi di commit.** Vale per ogni sessione, ogni subagent (Fable, Sonnet, Opus, ecc.) e ogni branch/worktree di questo repo, senza eccezioni.
 
 ---
 
