@@ -189,12 +189,12 @@ Tutto in `chess_app/frontend/index.html` (nessun file nuovo, resta single-file).
 
 ---
 
-### 🔄 Fase 4 — Allenamento mirato: errori, ripasso e finali (backend completato, resta il frontend)
+### ✅ Fase 4 — Allenamento mirato: errori, ripasso e finali — completata 11 luglio 2026
 **Target: metà-fine maggio 2026 · ~3 settimane · ~14 ore**
 
 Obiettivo: trasformare gli errori giocati in materiale di allenamento reale, non solo in statistiche a consuntivo. Puzzle generati dai propri blunder, ripasso a intervalli (spaced repetition), diagnosi delle debolezze per fase di gioco e tema tattico, drill di finali teorici. Dipende dalla persistenza di Fase 3 (`analysis_results`). Analisi di design completa in [`docs/training-mode.md`](docs/training-mode.md).
 
-**Stato:** tutti gli endpoint backend (puzzle da blunder + SRS, profilo debolezze, drill di finali) sono **completati** (11 luglio 2026, branch `feature/training-backend`, 25 nuovi test — 93/93 nella suite). Resta solo il frontend (pannello "Allenamento": risoluzione puzzle, dashboard debolezze, selezione drill finali).
+**Stato:** tutti gli endpoint backend (puzzle da blunder + SRS, profilo debolezze, drill di finali) sono **completati** (11 luglio 2026, branch `feature/training-backend`, 25 nuovi test — 93/93 nella suite). Il **frontend** (pannello "Allenamento": risoluzione puzzle, dashboard debolezze, selezione drill finali) è **completato** l'11 luglio 2026 sul branch `feature/training-ui` — vedi le note di implementazione frontend più sotto.
 
 | Settimana | Attività | Ore stimate | Modello suggerito | Stato |
 |-----------|----------|-------------|-------------------|-------|
@@ -202,7 +202,7 @@ Obiettivo: trasformare gli errori giocati in materiale di allenamento reale, non
 | Sett. 19 mag | `GET /training/puzzles/next`, `POST /training/puzzles/{id}/answer` con scheduling SM-2 semplificato | ~3 ore | Opus | ✅ fatto |
 | Sett. 26 mag | `GET /training/weaknesses` — aggregazione errori per fase (apertura/mediogioco/finale) e tema tattico (fork/pin/re esposto) da `analysis_results` | ~3 ore | Opus | ✅ fatto |
 | Sett. 26 mag | Drill finali teorici: `GET /training/endgames` (lista statica ~15-20 FEN canonici), `POST /training/endgames/{id}/start` (estende `POST /game/new` con `start_fen` opzionale) | ~2 ore | Sonnet | ✅ fatto |
-| Sett. 2 giu | Frontend: pannello "Allenamento" — risoluzione puzzle, dashboard debolezze, selezione drill finali | ~3 ore | Opus | 🔲 da fare |
+| Sett. 2 giu | Frontend: pannello "Allenamento" — risoluzione puzzle, dashboard debolezze, selezione drill finali | ~3 ore | Opus | ✅ fatto |
 
 Tabelle DB (già presenti a schema da Fase 3, nessuna migration nuova):
 - `puzzles` — id, game_id, ply, fen, best_move_uci, source (`blunder`\|`mistake`\|`inaccuracy` — vedi nota fallback sotto), created_at
@@ -221,6 +221,16 @@ Tabelle DB (già presenti a schema da Fase 3, nessuna migration nuova):
   - **Temi tattici**: euristiche `python-chess` **approssimate** (esplicitamente NON un motore tattico, per scelta di design) — fork = la mossa migliore porta un pezzo che attacca ≥2 pezzi avversari non-pedone e la mossa giocata no; pin = la mossa migliore crea un `is_pinned()` nuovo su un pezzo avversario che la mossa giocata non crea; re esposto = la mossa giocata riduce lo scudo pedonale del proprio re (pedoni propri nelle 2 file/ranghi davanti al re) più di quanto avrebbe fatto la mossa migliore. Solo righe `blunder`/`mistake` contribuiscono ai temi (non `inaccuracy`/`good`). La risposta include un campo `"note"` che ricorda esplicitamente la natura euristica ("temi probabili", non diagnosi certa), come richiesto dalla spec.
 - **Drill di finali — fix di un bug latente in `_create_new_game`.** La vecchia logica di `/game/new` decideva la prima mossa dell'engine con `if player_color == "black"` hardcoded, assumendo sempre bianco al tratto all'inizio (vero solo per la posizione standard, mai esercitato da uno `start_fen` custom fino ad ora). Il drill "Philidor" parte col **nero** al tratto: `_create_new_game` ora deduce il turno iniziale da `board.turn` e fa aprire l'engine solo se non coincide col colore scelto dal player — generalizza il comportamento esistente (per la posizione standard è un no-op, verificato dai test Fase 3 già passanti) e lo rende corretto anche per FEN custom. `POST /training/endgames/{id}/start` riusa `_create_new_game(..., source="endgame_drill")`, nessuna duplicazione con `/game/new`.
 - **16 posizioni** nel set statico (`ENDGAME_DRILLS` in `main.py`): matti elementari (KQvK, KRvK, K2RvK, due alfieri vK, alfiere+cavallo vK), K+P (opposizione vincente e patta, pedone passato lontano, trébuchet), finali di torre (Lucena, Philidor, torre vs alfiere/cavallo, pedone di torre), donna vs pedone in settima, donna vs torre. Stockfish a piena forza (già usato altrove nell'app) funge da "tablebase" didattica, coerente con la scelta di design della spec.
+
+#### Frontend: pannello "Allenamento" (implementato 11 luglio 2026, `frontend/index.html`)
+
+Quarta tab nella topnav (Gioca / **Allenamento** / Storico / Crescita), stesso pattern `showView()` senza router. Tutto nel singolo `index.html`, nessuna modifica al backend. Tre sotto-sezioni:
+
+- **Puzzle solver** (`GET /training/puzzles/next` + `POST /training/puzzles/{id}/answer`): board col renderer condiviso `buildBoardEl()`, orientata su `player_to_move`; interazione click-pezzo→click-destinazione identica alla partita live (riusa `generateMoveCandidates` e `askPromotion` per le promozioni), ma su uno stato separato `training` — la partita live nella vista Gioca non viene toccata. Dopo la risposta la board diventa read-only e la mossa migliore è evidenziata col highlight `.last-move`; feedback corretto/sbagliato + scheduling SRS (prossimo ripasso, streak). Badge sorgente riusa le classi `.badge blunder/mistake/inaccuracy` esistenti. Coda vuota gestita col messaggio del backend + rimando a drill/analisi.
+  - **Anti-orfani:** rientrare nella vista NON rifetcha un puzzle ancora senza risposta — ogni `GET /puzzles/next` a coda SRS vuota *genera* un puzzle nuovo dal blunder successivo, e la carta SRS nasce solo alla prima risposta: rifetch indiscriminato orfanerebbe puzzle mai tentati.
+- **Dashboard debolezze** (`GET /training/weaknesses`): barre orizzontali HTML/CSS pure (nessuna libreria, niente SVG qui — più semplice del pattern chart), una sola tinta (`--blue`) per gruppo perché ogni gruppo è una sola serie di magnitudine, larghezza relativa al massimo del proprio gruppo, valore sempre in testo accanto alla barra. Il campo `note` del backend ("temi probabili, non diagnosi certa") è mostrato testualmente sotto le barre.
+- **Drill di finali** (`GET /training/endgames` + `POST /training/endgames/{id}/start`): lista statica con badge obiettivo (Vinci/Patta) e select forza avversario (default 2400 — difesa/attacco quasi-tablebase è il senso didattico del drill). Il player gioca il **lato al tratto sul FEN** del drill (è il lato che ha l'obiettivo); l'avvio ruota nella vista Gioca e riusa il flusso live esistente (`updateState`), nessuna modalità parallela. Refactor minimi a supporto: `resetPlayUi()` estratto da `startGame()` e `requestGameStart(fn)` che generalizza il modal di conferma "partita in corso" a qualsiasi azione di avvio (nuova partita o drill).
+- **Verifica** (stessa tecnica di Fase 3, nessun browser disponibile): `node --check` sullo script; harness `jsdom` che carica il vero `index.html` (unica patch: API→porta di test) e guida i flussi con `fetch()` reali contro un backend isolato (DB scratch via `CHESS_LAB_DB`, porta 8766) popolato da partite vere giocate e analizzate via API — caso coda-vuota su DB fresco, risposta sbagliata e corretta via click sulle caselle, barre debolezze, avvio drill → mossa reale nella vista Gioca → modal di conferma sul secondo drill, drill Philidor col nero al tratto. 93/93 test backend invariati.
 
 ---
 
@@ -285,13 +295,13 @@ Aprile 2026
 Maggio 2026
 ├── Sett. 5 mag   ████  Fase 3 — DB + storico            ✅ completato
 ├── Sett. 12 mag  ████  Fase 3 — replay + FE storico      ✅ completato
-├── Sett. 19 mag  ████  Fase 4 — puzzle da blunder + spaced repetition  ✅ backend completato
-└── Sett. 26 mag  ████  Fase 4 — profilo debolezze + drill finali  ✅ backend completato
+├── Sett. 19 mag  ████  Fase 4 — puzzle da blunder + spaced repetition  ✅ completato
+└── Sett. 26 mag  ████  Fase 4 — profilo debolezze + drill finali  ✅ completato
 
 Giugno 2026
-├── Sett. 2 giu   ████  Fase 4 — frontend pannello Allenamento  ← prossimo (frontend)
-├── Sett. 9 giu   ████  Fase 5 — eval chart
-├── Sett. 16 giu  ████  Fase 5 — aperture ECO
+├── Sett. 2 giu   ████  Fase 4 — frontend pannello Allenamento  ✅ completato
+├── Sett. 9 giu   ████  Fase 5 — eval chart  ✅ completato (anticipato)
+├── Sett. 16 giu  ████  Fase 5 — aperture ECO  ← prossimo
 └── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard
 
 Luglio 2026
