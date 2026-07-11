@@ -103,7 +103,9 @@ Note tecniche:
 
 Obiettivo: le partite sopravvivono al riavvio del server. Storico consultabile e replay.
 
-**Stato:** fondazione di persistenza + **tutti gli endpoint backend di storico/replay/delete/import/analisi** sono **completati** (11 luglio 2026, branch `feature/history-analytics-api`). Resta solo il frontend (pagina storico, replay con frecce, import PGN lato UI) in una fase successiva.
+**Stato:** fondazione di persistenza + **tutti gli endpoint backend di storico/replay/delete/import/analisi + le statistiche aggregate (`/stats/summary`, `/stats/progress` con ELO simulato)** sono **completati** (11 luglio 2026, branch `feature/history-analytics-api`). Resta solo il frontend (pagina storico, replay con frecce, import PGN, grafico di crescita lato UI) in una fase successiva.
+
+**Nota (analytics anticipata):** le statistiche aggregate e l'ELO simulato erano originariamente a roadmap in Fase 5 ("Statistiche personali"); sono state anticipate qui perché leggono lo stesso storico persistito e completano la vista "storia" del backend in un colpo solo (consolidamento persistenza+analytics, vedi memoria progetto). Spec di design autoritativa in [`docs/growth-analytics.md`](docs/growth-analytics.md).
 
 **Nota:** l'**export** PGN (scaricare la partita corrente come `.pgn`) è stato anticipato l'11 luglio 2026, fuori roadmap — puro frontend, il backend genera già il PGN in ogni risposta di stato. Vedi [`docs/improvements.md`](docs/improvements.md). L'**import** PGN ha ora il backend pronto (`POST /games/import`, vedi sotto); resta solo l'import lato UI.
 
@@ -115,7 +117,8 @@ Obiettivo: le partite sopravvivono al riavvio del server. Storico consultabile e
 | Sett. 12 mag | `GET /game/{id}/replay` (sequenza FEN) | ~1.5 ore | Sonnet | ✅ fatto |
 | Sett. 12 mag | Persistenza risultati `/game/analyze` → `analysis_results` (colonne già presenti) | ~1 ora | Sonnet | ✅ fatto |
 | Sett. 12 mag | Backend `POST /games/import` (parsing PGN esterno, non a roadmap in origine ma raggruppato qui perché stessa area di storico) | — | Sonnet | ✅ fatto |
-| Sett. 12 mag | Frontend: pagina storico, replay con frecce, import PGN | ~2 ore | Opus | 🔲 da fare |
+| Sett. 12 mag | Statistiche aggregate `GET /stats/summary` + `GET /stats/progress` con ELO simulato (anticipate da Fase 5 — vedi `docs/growth-analytics.md`) | ~3 ore | Opus | ✅ fatto |
+| Sett. 12 mag | Frontend: pagina storico, replay con frecce, import PGN, grafico di crescita | ~2 ore | Opus | 🔲 da fare |
 
 #### Schema DB reale (implementato)
 
@@ -460,6 +463,51 @@ Response:  # stesso shape di board_to_state (GET /game/{id}) + "source"
 Persistenza analisi (additiva, non cambia la risposta esistente di `/game/analyze`):
 upsert per-ply in `analysis_results` (unique `game_id`+`ply`, idempotente) +
 aggiornamento di `games.analyzed_at`/`player_accuracy`/`blunders`/`mistakes`/`inaccuracies`.
+
+### Statistiche aggregate Fase 3 (`/stats/*`) — implementati
+
+Aggregazioni read-only su tutto lo storico persistito (dal DB, non dalla cache),
+per la vista "sto migliorando?". Filtri condivisi con `GET /games` (fonte unica:
+`_result_predicate`/`_player_result`/`_game_filter_conditions` in `main.py`):
+`color`, `source` (default `play` — import/drill esclusi), `date_from`/`date_to`
+(`YYYY-MM-DD` su `created_at`, `date_to` inclusivo del giorno intero; `400` se
+formato errato). Spec autoritativa: [`docs/growth-analytics.md`](docs/growth-analytics.md).
+
+```python
+# Numeri headline. I tassi sono relativi alle partite DECISE (result non nullo);
+# avg_accuracy media games.player_accuracy SOLO sulle partite analizzate
+# (analyzed_at IS NOT NULL); avg_think_ms_per_move è sulle sole mosse del player
+# (moves.color == games.player_color). null dove non c'è dato.
+GET /stats/summary?color=white&source=play&date_from=2026-05-01&date_to=2026-05-31
+Response: {
+  "total_games": 42, "decided_games": 40, "analyzed_games": 30,
+  "wins": 22, "losses": 15, "draws": 3,
+  "win_rate": 0.55, "loss_rate": 0.375, "draw_rate": 0.075,
+  "avg_accuracy": 76.4 | null,
+  "total_blunders": 18, "total_mistakes": 41, "total_inaccuracies": 63,
+  "avg_think_ms_per_move": 4200 | null
+}
+
+# Serie temporale per il grafico di crescita (frontend Fase 3). Un punto per
+# partita DECISA in ordine cronologico, con ELO SIMULATO: update Elo classico
+# (K=32, seed 1200) con engine_elo come rating avversario e result relativo a
+# player_color come esito — proxy DIREZIONALE, non un rating rigoroso. simulated_elo
+# è il rating DOPO la partita. In corso saltate; import esclusi (engine_elo=0).
+GET /stats/progress?color=white&source=play
+Response: {
+  "seed_elo": 1200, "k_factor": 32, "games_counted": 40,
+  "current_elo": 1287, "peak_elo": 1310,
+  "series": [
+    { "game_id": "6f0610a7", "date": "2026-07-11T10:00:00", "game_number": 1,
+      "engine_elo": 1000, "result": "win", "score": 1.0,
+      "simulated_elo": 1214, "accuracy": 78.5 | null }
+  ],
+  "recent": {
+    "window": 10, "games": 10, "elo_change": 45,
+    "avg_accuracy": 74.2 | null, "wins": 6, "losses": 3, "draws": 1
+  }
+}
+```
 
 ### Endpoint da implementare in Fase 4 (Allenamento mirato)
 

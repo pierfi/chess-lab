@@ -6,6 +6,7 @@ import random
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
 
 import chess
 import chess.engine
@@ -270,6 +271,91 @@ def _cp_loss_to_move_accuracy(loss_cp: float) -> float:
     loss_cp = max(loss_cp, 0)
     accuracy = 103.1668 * math.exp(-0.04354 * loss_cp) - 3.1669
     return max(0.0, min(100.0, accuracy))
+
+# -------------------------------------------------------------------
+# Filtri storico condivisi tra GET /games e gli endpoint /stats/*.
+# Fonte unica di verità per la convenzione win/loss/draw (relativa a
+# player_color, NON alla stringa PGN grezza) e per i filtri di query.
+# -------------------------------------------------------------------
+def _result_predicate(result: str | None):
+    """Predicato SQL per il filtro result relativo a player_color.
+    win → il player ha vinto col suo colore; loss → l'inverso; draw → patta.
+    None (o valore ignoto) = nessun filtro."""
+    if result == "win":
+        return or_(
+            and_(Game.player_color == "white", Game.result == "1-0"),
+            and_(Game.player_color == "black", Game.result == "0-1"),
+        )
+    if result == "loss":
+        return or_(
+            and_(Game.player_color == "white", Game.result == "0-1"),
+            and_(Game.player_color == "black", Game.result == "1-0"),
+        )
+    if result == "draw":
+        return Game.result == "1/2-1/2"
+    return None
+
+def _player_result(player_color: str, result: str | None) -> str | None:
+    """Versione Python di _result_predicate: classifica un singolo esito dal
+    punto di vista del player. None se la partita non è decisa (in corso) o se
+    l'esito non è uno dei tre canonici. Stessa convenzione, calcolata in-memory
+    per gli endpoint che iterano le righe (es. la simulazione ELO)."""
+    if result == "1/2-1/2":
+        return "draw"
+    if (player_color == "white" and result == "1-0") or (
+        player_color == "black" and result == "0-1"
+    ):
+        return "win"
+    if result in ("1-0", "0-1"):
+        return "loss"
+    return None
+
+def _parse_date_range(
+    date_from: str | None, date_to: str | None
+) -> tuple[datetime | None, datetime | None]:
+    """Converte i filtri date (YYYY-MM-DD, su games.created_at) in un intervallo
+    [inizio, fine-esclusiva). date_to è inclusiva del giorno intero: internamente
+    diventa mezzanotte del giorno dopo (end-exclusive), così una partita giocata
+    alle 23:00 del giorno filtrato è compresa. 400 se il formato è errato."""
+    dt_from = dt_to = None
+    try:
+        if date_from is not None:
+            dt_from = datetime.combine(date.fromisoformat(date_from), datetime.min.time())
+        if date_to is not None:
+            dt_to = datetime.combine(
+                date.fromisoformat(date_to), datetime.min.time()
+            ) + timedelta(days=1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date (expected YYYY-MM-DD)")
+    return dt_from, dt_to
+
+def _game_filter_conditions(
+    color: str | None,
+    source: str | None,
+    dt_from: datetime | None,
+    dt_to: datetime | None,
+) -> list:
+    """Condizioni WHERE comuni a GET /games e /stats/*: source (default 'play' —
+    import e drill esclusi salvo richiesta esplicita), player_color, range date."""
+    conds = [Game.source == (source if source is not None else "play")]
+    if color is not None:
+        conds.append(Game.player_color == color)
+    if dt_from is not None:
+        conds.append(Game.created_at >= dt_from)
+    if dt_to is not None:
+        conds.append(Game.created_at < dt_to)
+    return conds
+
+# Simulazione ELO (vedi docs/growth-analytics.md). NON è un rating rigoroso: è
+# una trend line direzionale. Update Elo classico contro engine_elo come rating
+# avversario, K fisso, seed iniziale.
+SIM_ELO_SEED = 1200
+SIM_ELO_K = 32
+SIM_ELO_RECENT_WINDOW = 10
+
+def _elo_expected(player_elo: float, opponent_elo: float) -> float:
+    """Punteggio atteso Elo del player contro l'avversario (0..1)."""
+    return 1.0 / (1.0 + 10 ** ((opponent_elo - player_elo) / 400.0))
 
 # -------------------------------------------------------------------
 # Persistenza (write-through cache): il DB è la fonte durevole, la cache
@@ -694,26 +780,12 @@ def list_games(
     punto di vista del giocatore. Default ``source``: solo 'play' — i drill di
     finali e gli import restano fuori dallo storico partite di default."""
     with session_scope() as db:
-        stmt = select(Game)
-        stmt = stmt.where(Game.source == (source if source is not None else "play"))
-        if color is not None:
-            stmt = stmt.where(Game.player_color == color)
-        if result == "win":
-            stmt = stmt.where(
-                or_(
-                    and_(Game.player_color == "white", Game.result == "1-0"),
-                    and_(Game.player_color == "black", Game.result == "0-1"),
-                )
-            )
-        elif result == "loss":
-            stmt = stmt.where(
-                or_(
-                    and_(Game.player_color == "white", Game.result == "0-1"),
-                    and_(Game.player_color == "black", Game.result == "1-0"),
-                )
-            )
-        elif result == "draw":
-            stmt = stmt.where(Game.result == "1/2-1/2")
+        stmt = select(Game).where(
+            *_game_filter_conditions(color, source, None, None)
+        )
+        pred = _result_predicate(result)
+        if pred is not None:
+            stmt = stmt.where(pred)
 
         total = db.execute(
             select(func.count()).select_from(stmt.subquery())
@@ -886,3 +958,177 @@ def import_game(req: ImportPgnRequest):
     state = _board_to_state(game_id, game)
     state["source"] = "import"
     return state
+
+@app.get("/stats/summary")
+def stats_summary(
+    color: str | None = Query(default=None, pattern=r"^(white|black)$"),
+    source: str | None = Query(default=None),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+):
+    """Numeri di riepilogo su tutto lo storico persistito (filtrabile per colore,
+    range date su created_at, source). Convenzioni condivise con GET /games:
+    win/loss/draw relativi a player_color, source default 'play'.
+
+    - I *tassi* win/loss/draw sono relativi alle sole partite DECISE (con result
+      non nullo): le partite in corso non hanno esito e non devono diluire il
+      denominatore.
+    - avg_accuracy media games.player_accuracy solo sulle partite ANALIZZATE
+      (analyzed_at IS NOT NULL): le non analizzate non hanno accuracy e vanno
+      escluse, non contate come 0.
+    - avg_think_ms_per_move è calcolata sulle sole mosse DEL PLAYER (color ==
+      player_color della partita) con think_ms non nullo — riflette il tempo di
+      riflessione dell'utente, non quello dell'engine."""
+    dt_from, dt_to = _parse_date_range(date_from, date_to)
+    conds = _game_filter_conditions(color, source, dt_from, dt_to)
+
+    with session_scope() as db:
+        rows = db.execute(select(Game).where(*conds)).scalars().all()
+
+        total_games = len(rows)
+        wins = losses = draws = 0
+        for row in rows:
+            outcome = _player_result(row.player_color, row.result)
+            if outcome == "win":
+                wins += 1
+            elif outcome == "loss":
+                losses += 1
+            elif outcome == "draw":
+                draws += 1
+        decided = wins + losses + draws
+
+        analyzed = [r for r in rows if r.analyzed_at is not None]
+        avg_accuracy = (
+            round(sum(r.player_accuracy for r in analyzed) / len(analyzed), 1)
+            if analyzed
+            else None
+        )
+        total_blunders = sum(r.blunders or 0 for r in analyzed)
+        total_mistakes = sum(r.mistakes or 0 for r in analyzed)
+        total_inaccuracies = sum(r.inaccuracies or 0 for r in analyzed)
+
+        # Think time medio sulle sole mosse del player (join moves↔games sugli
+        # stessi filtri, color della mossa == player_color della partita).
+        avg_think_ms_row = db.execute(
+            select(func.avg(Move.think_ms))
+            .select_from(Move)
+            .join(Game, Move.game_id == Game.id)
+            .where(
+                *conds,
+                Move.color == Game.player_color,
+                Move.think_ms.isnot(None),
+            )
+        ).scalar_one()
+        avg_think_ms = round(avg_think_ms_row) if avg_think_ms_row is not None else None
+
+    def _rate(n: int) -> float:
+        return round(n / decided, 3) if decided else 0.0
+
+    return {
+        "total_games": total_games,
+        "decided_games": decided,
+        "analyzed_games": len(analyzed),
+        "wins": wins,
+        "losses": losses,
+        "draws": draws,
+        "win_rate": _rate(wins),
+        "loss_rate": _rate(losses),
+        "draw_rate": _rate(draws),
+        "avg_accuracy": avg_accuracy,
+        "total_blunders": total_blunders,
+        "total_mistakes": total_mistakes,
+        "total_inaccuracies": total_inaccuracies,
+        "avg_think_ms_per_move": avg_think_ms,
+    }
+
+@app.get("/stats/progress")
+def stats_progress(
+    color: str | None = Query(default=None, pattern=r"^(white|black)$"),
+    source: str | None = Query(default=None),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+):
+    """Serie temporale per il grafico di crescita (frontend Fase 3). Un punto per
+    partita DECISA, in ordine cronologico (created_at asc). Ogni punto porta un
+    ELO simulato — proxy direzionale del miglioramento, NON un rating rigoroso.
+
+    Algoritmo (vedi docs/growth-analytics.md): update Elo classico partita-per-
+    partita, con engine_elo come rating avversario e result (relativo a
+    player_color) come esito. K fisso, seed iniziale; il rating è riportato DOPO
+    l'applicazione di ogni partita. Le partite in corso (result nullo) sono
+    saltate; source default 'play' esclude gli import (engine_elo=0 sentinella li
+    renderebbe inutilizzabili come avversario)."""
+    dt_from, dt_to = _parse_date_range(date_from, date_to)
+    conds = _game_filter_conditions(color, source, dt_from, dt_to)
+
+    with session_scope() as db:
+        rows = db.execute(
+            select(Game).where(*conds).order_by(Game.created_at.asc(), Game.id.asc())
+        ).scalars().all()
+
+        series = []
+        current = float(SIM_ELO_SEED)
+        peak = float(SIM_ELO_SEED)
+        game_number = 0
+        for row in rows:
+            outcome = _player_result(row.player_color, row.result)
+            if outcome is None:
+                continue  # partita in corso / esito non canonico: non conteggiata
+            score = {"win": 1.0, "draw": 0.5, "loss": 0.0}[outcome]
+            expected = _elo_expected(current, row.engine_elo)
+            current = current + SIM_ELO_K * (score - expected)
+            peak = max(peak, current)
+            game_number += 1
+            series.append({
+                "game_id": row.id,
+                "date": row.created_at.isoformat(),
+                "game_number": game_number,
+                "engine_elo": row.engine_elo,
+                "result": outcome,
+                "score": score,
+                "simulated_elo": round(current),
+                "accuracy": (
+                    round(row.player_accuracy, 1)
+                    if row.player_accuracy is not None
+                    else None
+                ),
+            })
+
+    # Finestra recente: variazione ELO e accuracy media sulle ultime N partite.
+    window = SIM_ELO_RECENT_WINDOW
+    recent_slice = series[-window:]
+    if recent_slice:
+        pre_idx = len(series) - len(recent_slice) - 1
+        pre_elo = series[pre_idx]["simulated_elo"] if pre_idx >= 0 else SIM_ELO_SEED
+        recent_accs = [p["accuracy"] for p in recent_slice if p["accuracy"] is not None]
+        recent = {
+            "window": window,
+            "games": len(recent_slice),
+            "elo_change": recent_slice[-1]["simulated_elo"] - pre_elo,
+            "avg_accuracy": (
+                round(sum(recent_accs) / len(recent_accs), 1) if recent_accs else None
+            ),
+            "wins": sum(1 for p in recent_slice if p["result"] == "win"),
+            "losses": sum(1 for p in recent_slice if p["result"] == "loss"),
+            "draws": sum(1 for p in recent_slice if p["result"] == "draw"),
+        }
+    else:
+        recent = {
+            "window": window,
+            "games": 0,
+            "elo_change": 0,
+            "avg_accuracy": None,
+            "wins": 0,
+            "losses": 0,
+            "draws": 0,
+        }
+
+    return {
+        "seed_elo": SIM_ELO_SEED,
+        "k_factor": SIM_ELO_K,
+        "games_counted": len(series),
+        "current_elo": series[-1]["simulated_elo"] if series else SIM_ELO_SEED,
+        "peak_elo": round(peak),
+        "series": series,
+        "recent": recent,
+    }

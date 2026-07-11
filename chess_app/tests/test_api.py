@@ -1,11 +1,19 @@
 """Test end-to-end per Chess Lab API."""
 
+from datetime import datetime, timedelta
+
 import chess
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from backend.main import app, games
+from backend.main import (
+    SIM_ELO_K,
+    SIM_ELO_SEED,
+    _elo_expected,
+    app,
+    games,
+)
 from backend.db import AnalysisResult, SessionLocal, Game, Move, utcnow
 
 
@@ -763,4 +771,225 @@ class TestImportPgn:
 
     def test_import_empty_string_rejected(self, client):
         r = client.post("/games/import", json={"pgn": ""})
+        assert r.status_code == 400
+
+
+# -------------------------------------------------------------------
+# GET /stats/summary — numeri headline aggregati
+# -------------------------------------------------------------------
+class TestStatsSummary:
+    # Il DB temporaneo è condiviso da tutta la sessione pytest (vedi conftest.py),
+    # e /stats aggrega su TUTTO lo storico. Per asserzioni deterministiche i test
+    # isolano i propri dati con `source` custom (gli altri test scrivono solo
+    # 'play'/'import'), poi filtrano /stats?source=<custom>.
+    @pytest.fixture(scope="class", autouse=True)
+    def seed(self):
+        base = datetime(2026, 3, 1, 12, 0, 0)
+        with SessionLocal() as db:
+            # 2 analizzate (accuracy nota), 1 win nera non analizzata, 1 patta,
+            # 1 in corso (result None) → total 5, decise 4.
+            db.add(Game(id="ss_win_a", player_color="white", engine_elo=1000,
+                        result="1-0", source="statssum", created_at=base,
+                        analyzed_at=utcnow(), player_accuracy=80.0,
+                        blunders=1, mistakes=2, inaccuracies=3))
+            db.add(Game(id="ss_loss_", player_color="white", engine_elo=1000,
+                        result="0-1", source="statssum",
+                        created_at=base + timedelta(minutes=1),
+                        analyzed_at=utcnow(), player_accuracy=60.0,
+                        blunders=3, mistakes=1, inaccuracies=0))
+            db.add(Game(id="ss_bwin_", player_color="black", engine_elo=1000,
+                        result="0-1", source="statssum",
+                        created_at=base + timedelta(minutes=2)))
+            db.add(Game(id="ss_draw_", player_color="white", engine_elo=1000,
+                        result="1/2-1/2", source="statssum",
+                        created_at=base + timedelta(minutes=3)))
+            db.add(Game(id="ss_prog_", player_color="white", engine_elo=1000,
+                        result=None, source="statssum",
+                        created_at=base + timedelta(minutes=4)))
+            # Mosse su ss_win_a (player bianco): due mosse bianche (player) +
+            # una nera (engine, esclusa dalla media think_ms).
+            for ply, color, uci, san, tm in [
+                (1, "white", "e2e4", "e4", 1000),
+                (2, "black", "e7e5", "e5", 3000),
+                (3, "white", "g1f3", "Nf3", 2000),
+            ]:
+                db.add(Move(game_id="ss_win_a", ply=ply, color=color, uci=uci,
+                            san=san, fen_before="startfen", think_ms=tm,
+                            created_at=base))
+            db.commit()
+        yield
+
+    def test_summary_counts_and_rates(self, client):
+        d = client.get("/stats/summary", params={"source": "statssum"}).json()
+        assert d["total_games"] == 5
+        assert d["decided_games"] == 4  # esclude la partita in corso
+        assert d["wins"] == 2  # ss_win_a (bianco 1-0) + ss_bwin_ (nero 0-1)
+        assert d["losses"] == 1
+        assert d["draws"] == 1
+        assert d["win_rate"] == 0.5
+        assert d["loss_rate"] == 0.25
+        assert d["draw_rate"] == 0.25
+
+    def test_summary_accuracy_only_over_analyzed(self, client):
+        d = client.get("/stats/summary", params={"source": "statssum"}).json()
+        assert d["analyzed_games"] == 2
+        # Media SOLO sulle 2 analizzate: (80+60)/2. Le non analizzate non contano
+        # come 0, sono escluse dal denominatore.
+        assert d["avg_accuracy"] == 70.0
+        assert d["total_blunders"] == 4
+        assert d["total_mistakes"] == 3
+        assert d["total_inaccuracies"] == 3
+
+    def test_summary_think_ms_player_moves_only(self, client):
+        d = client.get("/stats/summary", params={"source": "statssum"}).json()
+        # Solo mosse del player (bianche): (1000+2000)/2; la mossa engine (3000)
+        # è esclusa.
+        assert d["avg_think_ms_per_move"] == 1500
+
+    def test_summary_color_filter(self, client):
+        d = client.get(
+            "/stats/summary", params={"source": "statssum", "color": "black"}
+        ).json()
+        assert d["total_games"] == 1
+        assert d["decided_games"] == 1
+        assert d["wins"] == 1  # nero con 0-1 = vittoria del player
+        assert d["avg_accuracy"] is None  # la partita nera non è analizzata
+
+    def test_summary_empty_history(self, client):
+        d = client.get("/stats/summary", params={"source": "statsempty"}).json()
+        assert d["total_games"] == 0
+        assert d["decided_games"] == 0
+        assert d["wins"] == 0
+        assert d["win_rate"] == 0.0
+        assert d["loss_rate"] == 0.0
+        assert d["draw_rate"] == 0.0
+        assert d["avg_accuracy"] is None
+        assert d["avg_think_ms_per_move"] is None
+        assert d["total_blunders"] == 0
+
+    def test_summary_date_range(self, client):
+        # date_to è inclusivo del giorno intero: 2026-03-01 copre tutte le 5.
+        d = client.get("/stats/summary", params={
+            "source": "statssum", "date_from": "2026-03-01", "date_to": "2026-03-01",
+        }).json()
+        assert d["total_games"] == 5
+        # Un intervallo che finisce prima: nessuna partita.
+        d2 = client.get("/stats/summary", params={
+            "source": "statssum", "date_from": "2026-02-01", "date_to": "2026-02-28",
+        }).json()
+        assert d2["total_games"] == 0
+
+    def test_summary_invalid_date(self, client):
+        r = client.get(
+            "/stats/summary", params={"source": "statssum", "date_from": "not-a-date"}
+        )
+        assert r.status_code == 400
+
+
+# -------------------------------------------------------------------
+# GET /stats/progress — serie temporale + ELO simulato
+# -------------------------------------------------------------------
+class TestStatsProgress:
+    @pytest.fixture(scope="class", autouse=True)
+    def seed(self):
+        base = datetime(2026, 4, 1, 12, 0, 0)
+        with SessionLocal() as db:
+            for i in range(3):  # 3 vittorie contro engine 1200
+                db.add(Game(id=f"pw_{i}", player_color="white", engine_elo=1200,
+                            result="1-0", source="statswin",
+                            created_at=base + timedelta(minutes=i)))
+            for i in range(3):  # 3 sconfitte
+                db.add(Game(id=f"pl_{i}", player_color="white", engine_elo=1200,
+                            result="0-1", source="statsloss",
+                            created_at=base + timedelta(minutes=i)))
+            db.commit()
+        yield
+
+    def test_progress_all_wins_increases(self, client):
+        d = client.get("/stats/progress", params={"source": "statswin"}).json()
+        assert d["games_counted"] == 3
+        assert d["seed_elo"] == SIM_ELO_SEED
+        assert d["k_factor"] == SIM_ELO_K
+        elos = [p["simulated_elo"] for p in d["series"]]
+        assert elos == sorted(elos)  # monotòna non decrescente
+        assert d["series"][0]["simulated_elo"] > SIM_ELO_SEED
+        assert d["current_elo"] == elos[-1]
+        assert d["peak_elo"] == max(elos)
+        assert all(p["result"] == "win" and p["score"] == 1.0 for p in d["series"])
+        # game_number 1-based e progressivo
+        assert [p["game_number"] for p in d["series"]] == [1, 2, 3]
+
+    def test_progress_all_losses_decreases(self, client):
+        d = client.get("/stats/progress", params={"source": "statsloss"}).json()
+        assert d["games_counted"] == 3
+        assert d["current_elo"] < SIM_ELO_SEED
+        assert all(p["result"] == "loss" and p["score"] == 0.0 for p in d["series"])
+
+    def test_progress_matches_elo_formula(self, client):
+        # Sequenza deterministica win/loss/draw contro engine 1000: ricalcolo la
+        # serie con la stessa formula e confronto punto per punto.
+        base = datetime(2026, 5, 1, 12, 0, 0)
+        with SessionLocal() as db:
+            for i, res in enumerate(["1-0", "0-1", "1/2-1/2"]):
+                db.add(Game(id=f"pm_{i}", player_color="white", engine_elo=1000,
+                            result=res, source="statsmath",
+                            created_at=base + timedelta(minutes=i)))
+            db.commit()
+
+        d = client.get("/stats/progress", params={"source": "statsmath"}).json()
+
+        rating = float(SIM_ELO_SEED)
+        expected = []
+        for score in (1.0, 0.0, 0.5):
+            rating += SIM_ELO_K * (score - _elo_expected(rating, 1000))
+            expected.append(round(rating))
+        assert [p["simulated_elo"] for p in d["series"]] == expected
+        assert d["current_elo"] == expected[-1]
+        assert d["peak_elo"] == max(expected + [SIM_ELO_SEED])
+
+    def test_progress_skips_in_progress_games(self, client):
+        base = datetime(2026, 6, 1, 12, 0, 0)
+        with SessionLocal() as db:
+            db.add(Game(id="pip_win", player_color="white", engine_elo=1200,
+                        result="1-0", source="statsip", created_at=base))
+            db.add(Game(id="pip_none", player_color="white", engine_elo=1200,
+                        result=None, source="statsip",
+                        created_at=base + timedelta(minutes=1)))
+            db.commit()
+        d = client.get("/stats/progress", params={"source": "statsip"}).json()
+        assert d["games_counted"] == 1  # la partita in corso è saltata
+        assert len(d["series"]) == 1
+
+    def test_progress_empty_history(self, client):
+        d = client.get("/stats/progress", params={"source": "statsnone"}).json()
+        assert d["series"] == []
+        assert d["games_counted"] == 0
+        assert d["current_elo"] == SIM_ELO_SEED
+        assert d["peak_elo"] == SIM_ELO_SEED
+        assert d["recent"]["games"] == 0
+        assert d["recent"]["elo_change"] == 0
+        assert d["recent"]["avg_accuracy"] is None
+
+    def test_progress_recent_accuracy_only_analyzed(self, client):
+        base = datetime(2026, 7, 1, 12, 0, 0)
+        with SessionLocal() as db:
+            db.add(Game(id="pr_an", player_color="white", engine_elo=1200,
+                        result="1-0", source="statsrec", created_at=base,
+                        analyzed_at=utcnow(), player_accuracy=90.0))
+            db.add(Game(id="pr_non", player_color="white", engine_elo=1200,
+                        result="1-0", source="statsrec",
+                        created_at=base + timedelta(minutes=1)))
+            db.commit()
+        d = client.get("/stats/progress", params={"source": "statsrec"}).json()
+        assert d["recent"]["games"] == 2
+        assert d["recent"]["wins"] == 2
+        # Media accuracy recente solo sulla partita analizzata.
+        assert d["recent"]["avg_accuracy"] == 90.0
+        accs = [p["accuracy"] for p in d["series"]]
+        assert 90.0 in accs and None in accs
+
+    def test_progress_invalid_date(self, client):
+        r = client.get(
+            "/stats/progress", params={"source": "statswin", "date_from": "2026/01/01"}
+        )
         assert r.status_code == 400
