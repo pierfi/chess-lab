@@ -105,3 +105,39 @@ Causa più probabile: prima di `.square` non era dichiarato nessun `font-family`
 **Fix:** abbandonato il rendering via glifo Unicode. I pezzi ora sono veri asset SVG — il set "Cburnett" di Lichess (`chess_app/frontend/pieces/*.svg`, 12 file, licenza GPLv2+, vedi `pieces/NOTICE.md`), scelto dall'utente per massima riconoscibilità (è il set default di Lichess). `PIECES` è stato sostituito da `PIECE_FILES` (mappa carattere FEN → nome file) e da una funzione `pieceImg(fenChar)` che crea un `<img class="piece-img" src="pieces/{file}.svg">`; usata sia in `renderBoard()` che in `askPromotion()` (che ora non hardcoda più due set di glifi per colore). Le classi CSS `.white-piece`/`.black-piece` e il `font-family` dedicato ai glifi scacchistici sono stati rimossi: il colore è nel file SVG stesso (fill/stroke), non più delegato a CSS su testo. Asset serviti come file statici accanto a `index.html` (non inline, non npm) — restano apribili via `file://` senza server, coerente col vincolo esistente.
 
 **Nota di verifica:** stesso limite ambientale delle versioni precedenti — nessun browser disponibile in questo sandbox. A differenza dei fix precedenti, però, qui il colore non dipende più dal font di sistema: i file SVG hanno `fill` esplicito nel markup, quindi il rischio di regressione per font-fallback è eliminato strutturalmente, non solo mitigato. Verifica visiva umana comunque raccomandata alla prima apertura.
+
+---
+
+## Bug #7 — Segnalato: "mossa illegale" `10. cxd6` — verificato: non è un bug (en passant legale)
+
+**File:** nessuno (nessun codice modificato — segnalazione chiusa come non-issue)
+**Priorità:** N/A
+**Stato:** Chiuso — comportamento corretto, confermato con `python-chess` come ground truth
+
+**Segnalazione dell'utente:** in una partita salvata come PGN (`chess_app/resources_and_examples/chesslab-50e3e0c5.pgn`), alla mossa 9 il Nero gioca `d5`, poi al 10 il Bianco gioca `cxd6`, catturando il pedone nero. L'utente la ritiene una mossa impossibile: il pedone bianco era su c5, quindi una cattura "normale" su d6 (casella vuota) non avrebbe senso, e il pedone nero catturato non si trova nemmeno sulla casella di arrivo (d6) ma su d5.
+
+**Verifica (ground truth con `python-chess`, non assunta a priori):**
+Caricato il PGN esatto con `chess.pgn.read_game()` e rigiocate tutte le mosse mainline via `board.push()`, controllando ad ogni ply `move in board.legal_moves` **prima** di eseguire il push (stesso controllo usato dal backend, vedi sotto) e stampando FEN/`ep_square` prima di ogni mossa nell'intorno della mossa 9-10:
+
+```
+ply=17 (9. Bianco) uci=e1e2 legal=True san=Ke2
+  fen_before=r1b1k2r/pp1pppbp/5np1/2P5/NnP5/4PN2/PP3PPP/R1B1KB1R w KQkq - 1 9
+ply=18 (9. Nero)   uci=d7d5 legal=True san=d5
+  fen_before=r1b1k2r/pp1pppbp/5np1/2P5/NnP5/4PN2/PP2KPPP/R1B2B1R b kq - 2 9
+ply=19 (10. Bianco) uci=c5d6 legal=True san=cxd6
+  fen_before=r1b1k2r/pp2ppbp/5np1/2Pp4/NnP5/4PN2/PP2KPPP/R1B2B1R w kq d6 0 10
+  ep_square_before=43 (d6)   has_legal_en_passant=True
+ply=20 (10. Nero)  uci=b4c2 legal=True san=Nc2
+  fen_before=r1b1k2r/pp2ppbp/3P1np1/8/NnP5/4PN2/PP2KPPP/R1B2B1R b kq - 0 10
+```
+Rigiocata l'intera partita fino in fondo (75 ply, terminata `38. g8=Q#`): nessuna mossa ha mai fallito il controllo `in board.legal_moves`.
+
+Conferme puntuali:
+- Il pedone bianco era effettivamente su **c5** al momento della mossa 10 (arrivato lì con `4. dxc5`, mai spostato dopo).
+- `9...d5` è, come richiesto dalla regola, la **prima mossa** di quel pedone nero e di **due caselle** (d7→d5), portandolo esattamente adiacente al pedone bianco su c5.
+- Il FEN prima di `10. cxd6` riporta correttamente il 4° campo (target en passant) `d6`, e `board.ep_square` / `board.has_legal_en_passant()` confermano che l'en passant era l'unica ragione per cui `c5d6` risultava nelle mosse legali (c5→d6 non è altrimenti una mossa/cattura di pedone valida, essendo d6 vuota).
+- `board.san(move)` per `c5d6` in quella posizione restituisce esattamente `"cxd6"` — identica alla mossa realmente giocata nel PGN, notazione SAN standard per una cattura en passant (non distinta da una cattura normale nella notazione, da cui la confusione).
+
+**Conclusione:** `10. cxd6` è una **cattura en passant** pienamente regolare secondo le regole FIDE: un pedone che ha appena avanzato di due caselle passando accanto a un pedone avversario può essere catturato *come se* avesse avanzato di una sola casella, nella mossa immediatamente successiva. La cattura avviene per definizione su una casella (d6) diversa da quella occupata dal pedone catturato (d5) — è la mossa più comunemente scambiata per un bug da giocatori casual, esattamente lo scenario qui riportato. Il motore di validazione backend (`chess_app/backend/main.py:209`, `if move not in board.legal_moves: raise HTTPException(400, "Illegal move")`) usa lo stesso identico controllo `python-chess` verificato qui, quindi non c'è discrepanza tra il check indipendente e la logica applicativa: se la mossa fosse stata davvero illegale, il backend l'avrebbe rifiutata con 400.
+
+**Nessuna modifica al codice.** Non è stata toccata né la validazione backend (`main.py`) né l'euristica frontend `generateMoveCandidates()` (che gestisce l'en passant fin dal fix del Bug #4) — non ce n'era motivo, il comportamento osservato è corretto. Il gap è nel modello mentale della regola en passant lato utente, non nel codice.
