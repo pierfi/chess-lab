@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from backend.main import app, games
-from backend.db import SessionLocal, Game, Move
+from backend.db import AnalysisResult, SessionLocal, Game, Move, utcnow
 
 
 @pytest.fixture
@@ -398,4 +398,340 @@ class TestPersistence:
             "/game/new",
             json={"player_color": "white", "engine_elo": 800, "start_fen": "not-a-fen"},
         )
+        assert r.status_code == 400
+
+
+# -------------------------------------------------------------------
+# /game/analyze — persistenza in analysis_results + riepilogo su games
+# -------------------------------------------------------------------
+class TestAnalyzePersistence:
+    def test_analyze_persists_results_and_summary(self, client, white_game):
+        gid = white_game["game_id"]
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        client.post("/game/move", json={"game_id": gid, "move_uci": "d2d4"})
+
+        r = client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        assert r.status_code == 200
+        data = r.json()
+
+        with SessionLocal() as db:
+            rows = (
+                db.execute(
+                    select(AnalysisResult)
+                    .where(AnalysisResult.game_id == gid)
+                    .order_by(AnalysisResult.ply)
+                )
+                .scalars()
+                .all()
+            )
+            assert len(rows) == data["total_moves"]
+            for row, m in zip(rows, data["moves"]):
+                assert row.ply == m["ply"]
+                assert row.classification == m["classification"]
+                assert row.loss_cp == m["loss_cp"]
+                assert row.score_cp == m["score_cp"]
+                assert row.best_move_uci == m["best_move_uci"]
+                assert row.is_mate_swing == m["is_mate_swing"]
+
+            game_row = db.get(Game, gid)
+            assert game_row.analyzed_at is not None
+            assert game_row.player_accuracy == data["accuracy_score"]
+            assert game_row.blunders == data["blunders"]
+            assert game_row.mistakes == data["mistakes"]
+            assert game_row.inaccuracies == data["inaccuracies"]
+
+    def test_analyze_is_idempotent_no_duplicate_rows(self, client, white_game):
+        gid = white_game["game_id"]
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+
+        client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        client.post("/game/analyze", json={"game_id": gid, "depth": 8})  # re-analisi
+
+        with SessionLocal() as db:
+            rows = (
+                db.execute(select(AnalysisResult).where(AnalysisResult.game_id == gid))
+                .scalars()
+                .all()
+            )
+            plies = [row.ply for row in rows]
+            assert len(plies) == len(set(plies))  # nessun duplicato per ply
+
+    def test_analyze_without_db_row_does_not_500(self, client):
+        """Una partita iniettata solo in cache (nessuna riga games, come nel
+        test preesistente test_analyze_mate_swing_clamped) deve restare
+        analizzabile senza persistenza — _persist_analysis deve fare no-op,
+        non fallire la FK su analysis_results."""
+        board = chess.Board()
+        move_objects = []
+        for uci in ["f2f3", "e7e5", "g2g4", "d8h4"]:
+            mv = chess.Move.from_uci(uci)
+            move_objects.append(mv)
+            board.push(mv)
+        games["nodbrow1"] = {
+            "board": board,
+            "player_color": "white",
+            "engine_elo": 800,
+            "move_objects": move_objects,
+            "last_engine_move": None,
+            "created_at": "2026.07.11",
+        }
+        r = client.post("/game/analyze", json={"game_id": "nodbrow1", "depth": 8})
+        assert r.status_code == 200
+        with SessionLocal() as db:
+            assert db.get(Game, "nodbrow1") is None
+            rows = (
+                db.execute(select(AnalysisResult).where(AnalysisResult.game_id == "nodbrow1"))
+                .scalars()
+                .all()
+            )
+            assert rows == []
+
+
+# -------------------------------------------------------------------
+# GET /games — lista paginata/filtrata
+# -------------------------------------------------------------------
+class TestGamesList:
+    # Nota: l'intera classe di test condivide UN SOLO DB temporaneo per l'intera
+    # sessione pytest (vedi conftest.py) — non viene ripulito tra i test file.
+    # Molti altri test creano partite reali con source='play' (fixture
+    # white_game/black_game), quindi i controlli qui sotto usano containment
+    # (subset) invece di uguaglianza stretta dove il filtro si sovrappone a
+    # dati creati altrove. Solo i filtri per `result` (win/loss/draw) sono al
+    # sicuro da uguaglianza stretta: nessun altro test scrive un result reale
+    # nel DB (le partite create dai fixture non arrivano mai a game-over).
+    # Fixture scope="class" (non function): i game_id sono fissi, un secondo
+    # insert delle stesse righe per-test violerebbe la UNIQUE constraint.
+    @pytest.fixture(scope="class", autouse=True)
+    def seed(self):
+        rows = [
+            ("wingame1", "white", "1-0", "play"),      # win per player bianco
+            ("winbygam", "black", "0-1", "play"),      # win per player nero
+            ("lossgam1", "white", "0-1", "play"),       # loss per player bianco
+            ("drawgame", "black", "1/2-1/2", "play"),  # draw
+            ("importga", "white", "1-0", "import"),     # esclusa di default
+        ]
+        with SessionLocal() as db:
+            for gid, color, result, source in rows:
+                db.add(Game(
+                    id=gid, player_color=color, engine_elo=800,
+                    result=result, source=source, created_at=utcnow(),
+                ))
+            db.commit()
+        yield
+
+    def test_default_source_excludes_import(self, client):
+        r = client.get("/games", params={"per_page": 100})
+        assert r.status_code == 200
+        data = r.json()
+        ids = {item["game_id"] for item in data["items"]}
+        assert "importga" not in ids
+        assert {"wingame1", "winbygam", "lossgam1", "drawgame"} <= ids
+
+    def test_filter_color(self, client):
+        r = client.get("/games", params={"color": "black", "per_page": 100})
+        data = r.json()
+        assert all(item["player_color"] == "black" for item in data["items"])
+        ids = {item["game_id"] for item in data["items"]}
+        assert {"winbygam", "drawgame"} <= ids
+
+    def test_filter_result_win_relative_to_player_color(self, client):
+        r = client.get("/games", params={"result": "win", "per_page": 100})
+        data = r.json()
+        ids = {item["game_id"] for item in data["items"]}
+        assert ids == {"wingame1", "winbygam"}
+
+    def test_filter_result_loss(self, client):
+        r = client.get("/games", params={"result": "loss", "per_page": 100})
+        data = r.json()
+        ids = {item["game_id"] for item in data["items"]}
+        assert ids == {"lossgam1"}
+
+    def test_filter_result_draw(self, client):
+        r = client.get("/games", params={"result": "draw", "per_page": 100})
+        data = r.json()
+        ids = {item["game_id"] for item in data["items"]}
+        assert ids == {"drawgame"}
+
+    def test_filter_source_import(self, client):
+        r = client.get("/games", params={"source": "import", "per_page": 100})
+        data = r.json()
+        ids = {item["game_id"] for item in data["items"]}
+        assert ids == {"importga"}
+
+    def test_pagination_mechanics(self, client):
+        # Non assume un totale fisso (il DB condiviso con l'intera sessione di
+        # test contiene molte altre partite 'play'): verifica solo il
+        # contratto di paginazione — dimensione pagina rispettata, pagine
+        # diverse restituiscono partite diverse, stesso totale su entrambe.
+        r1 = client.get("/games", params={"per_page": 1, "page": 1})
+        d1 = r1.json()
+        assert d1["per_page"] == 1
+        assert d1["page"] == 1
+        assert len(d1["items"]) == 1
+        assert d1["total"] >= 4  # almeno le 4 partite 'play' seedate qui
+
+        r2 = client.get("/games", params={"per_page": 1, "page": 2})
+        d2 = r2.json()
+        assert d2["page"] == 2
+        assert d2["total"] == d1["total"]
+        assert d2["items"][0]["game_id"] != d1["items"][0]["game_id"]
+
+    def test_invalid_result_filter_rejected(self, client):
+        r = client.get("/games", params={"result": "bogus"})
+        assert r.status_code == 422
+
+    def test_move_count_and_analysis_fields(self, client, white_game):
+        gid = white_game["game_id"]
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+
+        r = client.get("/games", params={"per_page": 100})
+        item = next(i for i in r.json()["items"] if i["game_id"] == gid)
+        assert item["move_count"] == 2
+        assert item["analyzed_at"] is None
+        assert item["player_accuracy"] is None
+        assert item["blunders"] is None
+
+        client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        r = client.get("/games", params={"per_page": 100})
+        item = next(i for i in r.json()["items"] if i["game_id"] == gid)
+        assert item["analyzed_at"] is not None
+        assert item["player_accuracy"] is not None
+        assert item["blunders"] is not None
+
+
+# -------------------------------------------------------------------
+# GET /game/{id}/replay
+# -------------------------------------------------------------------
+class TestReplay:
+    def test_replay_shape(self, client, white_game):
+        gid = white_game["game_id"]
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        client.post("/game/move", json={"game_id": gid, "move_uci": "g1f3"})
+
+        r = client.get(f"/game/{gid}/replay")
+        assert r.status_code == 200
+        data = r.json()
+        state = client.get(f"/game/{gid}").json()
+
+        assert len(data["fens"]) == len(data["moves"]) + 1
+        assert data["fens"][0] == chess.Board().fen()
+        assert data["fens"][-1] == state["fen"]
+        assert data["pgn"] == state["pgn"]
+        for m, uci in zip(data["moves"], state["move_history"]):
+            assert m["uci"] == uci
+        assert data["moves"][0]["san"] == "e4"
+
+    def test_replay_not_found(self, client):
+        r = client.get("/game/nonexist/replay")
+        assert r.status_code == 404
+
+    def test_replay_survives_cache_miss(self, client, white_game):
+        gid = white_game["game_id"]
+        # Una sola /game/move produce 2 ply (mossa player + risposta engine).
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        games.clear()
+        r = client.get(f"/game/{gid}/replay")
+        assert r.status_code == 200
+        assert len(r.json()["fens"]) == 3  # 2 ply + posizione finale
+
+
+# -------------------------------------------------------------------
+# DELETE /game/{id}
+# -------------------------------------------------------------------
+class TestDeleteGame:
+    def test_delete_cascades_and_evicts_cache(self, client, white_game):
+        gid = white_game["game_id"]
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        assert gid in games
+
+        with SessionLocal() as db:
+            assert db.execute(
+                select(Move).where(Move.game_id == gid)
+            ).scalars().all()
+            assert db.execute(
+                select(AnalysisResult).where(AnalysisResult.game_id == gid)
+            ).scalars().all()
+
+        r = client.delete(f"/game/{gid}")
+        assert r.status_code == 200
+        assert r.json() == {"deleted": True, "game_id": gid}
+        assert gid not in games  # evicted dalla cache, non resuscitabile
+
+        with SessionLocal() as db:
+            assert db.get(Game, gid) is None
+            # Cascade DB (ON DELETE CASCADE + foreign_keys=ON): verificato in
+            # pratica, non assunto.
+            assert db.execute(select(Move).where(Move.game_id == gid)).scalars().all() == []
+            assert db.execute(
+                select(AnalysisResult).where(AnalysisResult.game_id == gid)
+            ).scalars().all() == []
+
+        r = client.get(f"/game/{gid}")
+        assert r.status_code == 404
+
+    def test_delete_not_found(self, client):
+        r = client.delete("/game/nonexist")
+        assert r.status_code == 404
+
+
+# -------------------------------------------------------------------
+# POST /games/import
+# -------------------------------------------------------------------
+SAMPLE_PGN = """[Event "Test"]
+[Site "?"]
+[Date "2026.07.11"]
+[Round "1"]
+[White "A"]
+[Black "B"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O 1-0
+"""
+
+
+class TestImportPgn:
+    def test_import_creates_game_and_moves(self, client):
+        r = client.post("/games/import", json={"pgn": SAMPLE_PGN})
+        assert r.status_code == 200
+        data = r.json()
+        gid = data["game_id"]
+        assert data["source"] == "import"
+        assert len(data["move_history"]) == 9  # 9 mezze mosse nella mainline
+
+        with SessionLocal() as db:
+            row = db.get(Game, gid)
+            assert row is not None
+            assert row.source == "import"
+            assert row.player_color == "white"
+            moves = (
+                db.execute(select(Move).where(Move.game_id == gid).order_by(Move.ply))
+                .scalars()
+                .all()
+            )
+            assert len(moves) == 9
+            assert moves[0].uci == "e2e4"
+            assert moves[0].san == "e4"
+            assert all(m.think_ms is None for m in moves)
+
+    def test_import_game_is_playable_and_analyzable(self, client):
+        r = client.post("/games/import", json={"pgn": SAMPLE_PGN})
+        gid = r.json()["game_id"]
+
+        r = client.get(f"/game/{gid}")
+        assert r.status_code == 200
+
+        r = client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        assert r.status_code == 200
+        assert r.json()["total_moves"] == 9
+
+    def test_import_no_moves_rejected(self, client):
+        # Testo non-PGN: chess.pgn.read_game() lo tollera restituendo un Game
+        # valido a zero mosse — è così, non con parsed.errors, che rileviamo
+        # l'input spazzatura.
+        r = client.post("/games/import", json={"pgn": "this is not a pgn at all !!! ###"})
+        assert r.status_code == 400
+
+    def test_import_empty_string_rejected(self, client):
+        r = client.post("/games/import", json={"pgn": ""})
         assert r.status_code == 400
