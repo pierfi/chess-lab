@@ -24,6 +24,7 @@ Ultimo aggiornamento: **11 luglio 2026** (sessione in pausa per limite di utiliz
 | `feature/training-backend` | ✅ **Merged in `main`** (PR #10) | Fase 4 backend completa: `GET/POST /training/puzzles/*` (SRS SM-2 semplificato), `GET /training/weaknesses` (fase/tema), `GET /training/endgames` + `start` (drill finali, `start_fen`). Design in `docs/training-mode.md`. 93/93 test verdi. Fix collaterale: `_create_new_game` ora deriva il turno iniziale da `board.turn` invece di assumere sempre la posizione standard (necessario per i drill con `start_fen` custom). |
 
 | `feature/training-ui` | 🔄 **In corso** (agente Fable) | Fase 5 frontend (ultima fase): pannello Allenamento — puzzle solver (`GET/POST /training/puzzles/*`), dashboard debolezze (`GET /training/weaknesses`), selezione drill finali (`GET /training/endgames` + `start`). Worktree: `.claude/worktrees/training-ui`. Non tocca il backend. |
+| `docs/en-passant-bug-analysis` | ✅ Pushed, **pronto per PR** | Documento di analisi tecnica standalone per Bug #7 (`docs/en-passant-bug7-deepdive.md`) — non è un bug, verifica indipendente con python-chess, nessuna modifica al codice. Fuori dall'iniziativa a 5 fasi. |
 
 ## Prossimi passi, in ordine
 
