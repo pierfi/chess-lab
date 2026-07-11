@@ -219,6 +219,26 @@ body {
 .toolbar button:disabled { opacity: 0.5; cursor: default; }
 .toolbar button svg { flex-shrink: 0; }
 
+/* Selettore forza dell'hint engine — visibile solo in modalità assistita.
+   Riusa il pattern .strength-row del modal setup, in versione compatta. */
+.hint-strength {
+  display: none;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.hint-strength-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.hint-strength .strength-row button {
+  padding: 5px 0;
+  font-size: 12px;
+}
+
 .hint-panel {
   display: none;
   border-bottom: 1px solid #eee;
@@ -660,6 +680,10 @@ body {
           Esporta PGN
         </button>
       </div>
+      <div class="hint-strength" id="hint-strength">
+        <div class="hint-strength-label">Forza suggerimenti</div>
+        <div class="strength-row" id="hint-strength-row"></div>
+      </div>
       <div class="hint-panel" id="hint-panel"></div>
       <div class="move-list" id="move-list"></div>
     </div>
@@ -732,6 +756,7 @@ let state = {
   assisted: false,        // toggle modalità assistita
   hint: null,             // ultima risposta di /game/{id}/hint
   hintLoading: false,
+  hintElo: null,          // forza hint engine (ELO); null = piena forza (default)
 };
 
 // Pezzi come veri asset SVG (set Cburnett di Lichess, frontend/pieces/*.svg),
@@ -1033,11 +1058,15 @@ async function fetchHint() {
   const seq = ++hintSeq;
   state.hintLoading = true;
   renderHintUI();
+  // hint_elo omitted entirely when null: the backend treats a missing field
+  // as "full strength", the historical default behavior
+  const body = { multipv: 3, depth: 16 };
+  if (state.hintElo !== null) body.hint_elo = state.hintElo;
   try {
     const r = await fetch(`${API}/game/${state.gameId}/hint`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ multipv: 3, depth: 16 }),
+      body: JSON.stringify(body),
     });
     if (seq !== hintSeq) return;   // stale response, a newer request is in flight
     if (!r.ok) {
@@ -1063,6 +1092,44 @@ function renderHintUI() {
   updateEvalBar();
   renderArrows();
   renderHintPanel();
+  renderHintStrength();
+}
+
+// ---------- Forza dell'hint engine ----------
+
+// Selettore livelli: stessa scala STRENGTH_ELO dell'avversario + "Max" (piena
+// forza, hint_elo omesso nella richiesta) come default = comportamento storico
+function renderHintStrength() {
+  const wrap = document.getElementById('hint-strength');
+  wrap.style.display = state.assisted ? 'block' : 'none';
+  if (!state.assisted) return;
+  const row = document.getElementById('hint-strength-row');
+  row.innerHTML = '';
+  STRENGTH_ELO.forEach((elo, idx) => {
+    const btn = document.createElement('button');
+    btn.textContent = idx + 1;
+    btn.title = `Suggerimenti a livello ELO ${elo}`;
+    btn.classList.toggle('active', state.hintElo === elo);
+    btn.onclick = () => selectHintStrength(elo);
+    row.appendChild(btn);
+  });
+  const maxBtn = document.createElement('button');
+  maxBtn.textContent = 'Max';
+  maxBtn.title = 'Piena forza Stockfish (default)';
+  maxBtn.classList.toggle('active', state.hintElo === null);
+  maxBtn.onclick = () => selectHintStrength(null);
+  row.appendChild(maxBtn);
+}
+
+function selectHintStrength(elo) {
+  if (state.hintElo === elo) return;
+  state.hintElo = elo;
+  // Il suggerimento corrente è calcolato alla vecchia forza: azzerarlo mostra
+  // subito lo stato di caricamento (stesso pattern del toggle assistita).
+  // fetchHint() incrementa hintSeq, quindi ogni risposta in-flight alla
+  // vecchia forza viene scartata dal controllo anti-race esistente.
+  state.hint = null;
+  fetchHint();
 }
 
 // cp (white POV) -> % white fill; sigmoide per non saturare con pochi pedoni di vantaggio
