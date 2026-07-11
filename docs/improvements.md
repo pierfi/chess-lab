@@ -31,6 +31,39 @@ anticipato qui.
 
 ---
 
+## Forza regolabile dell'hint engine (Assisted Mode)
+
+**Branch:** `feature/hint-engine-strength`
+**Stato:** Implementato, in attesa di merge
+**Richiesto da:** utente, 11 luglio 2026
+
+**Pitch:** in modalità assistita l'hint engine gira sempre a piena forza — i
+suggerimenti sono mosse da super-GM, spesso incomprensibili per chi sta imparando.
+Poter abbassare la forza dei suggerimenti (non per "barare meno", ma per riceverli
+calibrati vicino al proprio livello) trasforma l'Assisted Mode da readout grezzo
+dell'engine a strumento di apprendimento graduato: la mossa suggerita diventa una
+mossa che un giocatore del proprio livello potrebbe davvero trovare e capire.
+
+**Approccio:** stesso modello mentale della forza avversario. Backend:
+`HintRequest` guadagna `hint_elo: int | None` (stessi bound di `engine_elo`,
+400–2800); in `game_hint()`, se presente, si riusa `elo_to_skill_depth()` per il
+solo Skill Level (`engine.configure({"Skill Level": skill})` sull'istanza per-chiamata
+— la depth resta governata da `req.depth`, invariata). **Scelta di design chiave:
+`hint_elo` omesso/null = nessuna `configure()` = piena forza — il comportamento
+storico è il default, chi non tocca il selettore non vede alcuna differenza.**
+Frontend: selettore compatto sotto la toolbar (`#hint-strength`), visibile solo in
+modalità assistita, che riusa la scala `STRENGTH_ELO` e il pattern `.strength-row`
+del modal setup, più un bottone "Max" (= `hint_elo` omesso, selezione di default).
+`state.hintElo` entra nel body di `fetchHint()`; il cambio livello azzera l'hint
+corrente e rilancia `fetchHint()`, che incrementa `hintSeq` — le risposte in-flight
+alla vecchia forza vengono scartate dal meccanismo anti-race già esistente.
+
+**Nota:** verificato live che `hint_elo: 2400` (Skill 20) coincide con l'output a
+piena forza e che a Skill 0 gli eval divergono. Aggiorna la nota di Fase 2
+"hint-engine a piena forza": resta vero come *default*, ora è opt-out.
+
+---
+
 ## Analysis Panel v2 — tabella a due colonne + curva eval
 
 **Pitch:** il pannello di analisi post-partita (`Analizza` → `POST /game/analyze`) mostrava una lista piatta di semimosse, una riga per ply: difficile capire a colpo d'occhio quale colore avesse giocato cosa. Richiesta esplicita dell'utente: riorganizzare in due colonne Bianco | Nero raggruppate per numero di mossa, come una score-sheet PGN. In aggiunta (concordato, non richiesto): curva eval in centipawn sull'intera partita con marker su blunder/errori e click-to-jump verso la riga corrispondente — di fatto un'anticipazione della riga "Grafico eval" di Fase 5.
