@@ -14,7 +14,7 @@ from backend.main import (
     app,
     games,
 )
-from backend.db import AnalysisResult, SessionLocal, Game, Move, utcnow
+from backend.db import AnalysisResult, Puzzle, SessionLocal, SrsCard, Game, Move, utcnow
 
 
 @pytest.fixture
@@ -993,3 +993,446 @@ class TestStatsProgress:
             "/stats/progress", params={"source": "statswin", "date_from": "2026/01/01"}
         )
         assert r.status_code == 400
+
+
+# -------------------------------------------------------------------
+# Fase 4 — Allenamento mirato (docs/training-mode.md)
+# -------------------------------------------------------------------
+# Le date di creazione delle partite seminate qui usano anni futuri (2031+)
+# apposta: GET /training/puzzles/next non filtra la coda di ripasso per
+# source e ordina i candidati per games.created_at DESC, quindi una data
+# lontana nel futuro garantisce che la riga seminata da un test vinca
+# sull'eventuale storico organico prodotto da altri test in questo stesso
+# processo (DB temporaneo condiviso per l'intera sessione, vedi conftest.py).
+# La generazione di NUOVI puzzle è comunque isolata anche per source tramite
+# il parametro opzionale ?source= (stesso pattern di GET /games e /stats/*).
+
+def _seed_puzzle_candidate(
+    db,
+    game_id: str,
+    source: str,
+    created_at: datetime,
+    classification: str = "blunder",
+    player_color: str = "white",
+    ply: int = 3,
+    played_uci: str = "d1h5",
+    best_move_uci: str = "g1f3",
+    fen_before: str = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+):
+    """Semina una partita minimale con una riga moves + analysis_results a un
+    ply dato, pronta per essere pescata da /training/puzzles/next."""
+    db.add(Game(id=game_id, player_color=player_color, engine_elo=800,
+                source=source, created_at=created_at))
+    db.flush()
+    db.add(Move(game_id=game_id, ply=ply, color=player_color, uci=played_uci,
+                san="Qh5", fen_before=fen_before, created_at=created_at))
+    db.add(AnalysisResult(game_id=game_id, ply=ply, classification=classification,
+                           loss_cp=250, score_cp=-100, best_move_uci=best_move_uci))
+
+
+class TestTrainingPuzzlesNext:
+    def test_generates_puzzle_from_blunder(self, client):
+        src = "trainpz1"
+        with SessionLocal() as db:
+            _seed_puzzle_candidate(db, "tpz1a", src, datetime(2031, 1, 1))
+            db.commit()
+
+        r = client.get("/training/puzzles/next", params={"source": src})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["puzzle_id"] is not None
+        assert data["game_id"] == "tpz1a"
+        assert data["ply"] == 3
+        assert data["source"] == "blunder"
+        assert data["is_review"] is False
+        assert data["due_at"] is None
+        assert data["player_to_move"] == "white"  # FEN seminata: bianco al tratto
+
+        with SessionLocal() as db:
+            row = db.get(Puzzle, data["puzzle_id"])
+            assert row is not None
+            assert row.game_id == "tpz1a"
+            assert row.ply == 3
+            assert row.best_move_uci == "g1f3"
+            assert row.source == "blunder"
+
+    def test_picks_most_recent_candidate(self, client):
+        src = "trainpz2"
+        with SessionLocal() as db:
+            _seed_puzzle_candidate(db, "tpz2a", src, datetime(2031, 2, 1))
+            _seed_puzzle_candidate(db, "tpz2b", src, datetime(2031, 3, 1))  # più recente
+            db.commit()
+
+        data = client.get("/training/puzzles/next", params={"source": src}).json()
+        assert data["game_id"] == "tpz2b"
+
+    def test_already_puzzled_blunder_not_regenerated(self, client):
+        src = "trainpz3"
+        with SessionLocal() as db:
+            _seed_puzzle_candidate(db, "tpz3a", src, datetime(2031, 4, 1))
+            db.commit()
+
+        first = client.get("/training/puzzles/next", params={"source": src}).json()
+        assert first["puzzle_id"] is not None
+
+        second = client.get("/training/puzzles/next", params={"source": src}).json()
+        assert second["puzzle_id"] is None  # nessun'altra carta dovuta/candidata
+
+    def test_fallback_to_inaccuracy(self, client):
+        src = "trainpz4"
+        with SessionLocal() as db:
+            _seed_puzzle_candidate(
+                db, "tpz4a", src, datetime(2031, 5, 1), classification="inaccuracy"
+            )
+            db.commit()
+
+        data = client.get("/training/puzzles/next", params={"source": src}).json()
+        assert data["puzzle_id"] is not None
+        assert data["source"] == "inaccuracy"
+
+    def test_blunder_preferred_over_inaccuracy(self, client):
+        src = "trainpz5"
+        with SessionLocal() as db:
+            # l'inaccuracy è più recente ma il blunder/mistake ha priorità
+            _seed_puzzle_candidate(
+                db, "tpz5a", src, datetime(2031, 6, 1), classification="inaccuracy",
+            )
+            _seed_puzzle_candidate(
+                db, "tpz5b", src, datetime(2031, 5, 15), classification="blunder",
+            )
+            db.commit()
+
+        data = client.get("/training/puzzles/next", params={"source": src}).json()
+        assert data["game_id"] == "tpz5b"
+        assert data["source"] == "blunder"
+
+    def test_ignores_engine_side_errors(self, client):
+        """Un blunder/mistake della mossa dell'ENGINE (color diverso da
+        player_color) non deve diventare un puzzle self-generated."""
+        src = "trainpz6"
+        with SessionLocal() as db:
+            _seed_puzzle_candidate(
+                db, "tpz6a", src, datetime(2031, 7, 1), player_color="white",
+            )
+            db.flush()
+            mv = db.execute(select(Move).where(Move.game_id == "tpz6a")).scalar_one()
+            mv.color = "black"  # simula un "errore" lato engine, non del player
+            db.commit()
+
+        data = client.get("/training/puzzles/next", params={"source": src}).json()
+        assert data["puzzle_id"] is None
+
+    def test_no_candidates_returns_none(self, client):
+        data = client.get(
+            "/training/puzzles/next", params={"source": "trainpz_empty"}
+        ).json()
+        assert data["puzzle_id"] is None
+        assert "message" in data
+
+
+class TestTrainingPuzzlesAnswer:
+    def _generate_puzzle(self, client, src, game_id, seed_date):
+        with SessionLocal() as db:
+            _seed_puzzle_candidate(db, game_id, src, seed_date)
+            db.commit()
+        data = client.get("/training/puzzles/next", params={"source": src}).json()
+        assert data["puzzle_id"] is not None
+        return data["puzzle_id"]
+
+    def test_wrong_answer(self, client):
+        pid = self._generate_puzzle(client, "trainans1", "tans1a", datetime(2031, 8, 1))
+
+        r = client.post(f"/training/puzzles/{pid}/answer", json={"move_uci": "a2a3"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["correct"] is False
+        assert data["best_move_uci"] == "g1f3"
+        assert data["correct_streak"] == 0
+        assert data["interval_days"] == 1
+        assert abs(data["ease_factor"] - 2.3) < 1e-9  # 2.5 - 0.2
+
+        with SessionLocal() as db:
+            card = db.execute(
+                select(SrsCard).where(SrsCard.puzzle_id == pid)
+            ).scalar_one()
+            assert card.correct_streak == 0
+            assert card.interval_days == 1
+            assert abs(card.ease_factor - 2.3) < 1e-9
+            assert card.last_reviewed_at is not None
+            assert card.due_at is not None
+
+    def test_correct_answer_creates_card_on_first_attempt(self, client):
+        """La carta SRS nasce al primo TENTATIVO, non alla generazione del
+        puzzle (docs/training-mode.md) — non deve esistere prima di answer."""
+        pid = self._generate_puzzle(client, "trainans2", "tans2a", datetime(2031, 8, 2))
+        with SessionLocal() as db:
+            assert db.execute(
+                select(SrsCard).where(SrsCard.puzzle_id == pid)
+            ).scalar_one_or_none() is None
+
+        client.post(f"/training/puzzles/{pid}/answer", json={"move_uci": "g1f3"})
+        with SessionLocal() as db:
+            assert db.execute(
+                select(SrsCard).where(SrsCard.puzzle_id == pid)
+            ).scalar_one_or_none() is not None
+
+    def test_sm2_progression_on_consecutive_correct_answers(self, client):
+        """Progressione esatta dell'algoritmo SM-2 semplificato (spec
+        docs/training-mode.md) su 4 risposte corrette consecutive da una
+        carta nuova (ease_factor default 2.5):
+        streak 1 -> interval 1,  poi ease 2.6
+        streak 2 -> interval 3,  poi ease 2.7
+        streak 3 -> interval round(3*2.7)=8,  poi ease 2.8
+        streak 4 -> interval round(8*2.8)=22, poi ease 2.9
+        """
+        pid = self._generate_puzzle(client, "trainans3", "tans3a", datetime(2031, 8, 3))
+
+        expected = [
+            (1, 1, 2.6),
+            (2, 3, 2.7),
+            (3, 8, 2.8),
+            (4, 22, 2.9),
+        ]
+        for streak, interval, ease in expected:
+            r = client.post(f"/training/puzzles/{pid}/answer", json={"move_uci": "g1f3"})
+            data = r.json()
+            assert data["correct"] is True
+            assert data["correct_streak"] == streak
+            assert data["interval_days"] == interval
+            assert abs(data["ease_factor"] - ease) < 1e-9
+
+    def test_wrong_answer_resets_streak(self, client):
+        pid = self._generate_puzzle(client, "trainans4", "tans4a", datetime(2031, 8, 4))
+        client.post(f"/training/puzzles/{pid}/answer", json={"move_uci": "g1f3"})
+        client.post(f"/training/puzzles/{pid}/answer", json={"move_uci": "g1f3"})
+        # streak ora a 2 (interval 3, ease 2.7); una risposta sbagliata resetta tutto
+        r = client.post(f"/training/puzzles/{pid}/answer", json={"move_uci": "a2a3"})
+        data = r.json()
+        assert data["correct"] is False
+        assert data["correct_streak"] == 0
+        assert data["interval_days"] == 1
+        assert abs(data["ease_factor"] - 2.5) < 1e-9  # 2.7 - 0.2
+
+    def test_answer_case_insensitive_uci_match(self, client):
+        pid = self._generate_puzzle(client, "trainans5", "tans5a", datetime(2031, 8, 5))
+        r = client.post(f"/training/puzzles/{pid}/answer", json={"move_uci": "G1F3"})
+        assert r.json()["correct"] is True
+
+    def test_answer_unknown_puzzle_404(self, client):
+        r = client.post("/training/puzzles/999999/answer", json={"move_uci": "e2e4"})
+        assert r.status_code == 404
+
+
+# -------------------------------------------------------------------
+# GET /training/weaknesses — fase di gioco + tema tattico probabile
+# -------------------------------------------------------------------
+
+def _seed_analysis_row(
+    db,
+    game_id: str,
+    source: str,
+    ply: int,
+    player_color: str,
+    fen_before: str,
+    played_uci: str,
+    best_move_uci: str,
+    classification: str,
+    loss_cp: int,
+    score_cp: int,
+):
+    db.add(Game(id=game_id, player_color=player_color, engine_elo=800,
+                source=source, created_at=datetime(2026, 1, 1)))
+    db.flush()
+    db.add(Move(game_id=game_id, ply=ply, color=player_color, uci=played_uci,
+                san="-", fen_before=fen_before, created_at=datetime(2026, 1, 1)))
+    db.add(AnalysisResult(game_id=game_id, ply=ply, classification=classification,
+                           loss_cp=loss_cp, score_cp=score_cp, best_move_uci=best_move_uci))
+
+
+class TestTrainingWeaknesses:
+    def test_phase_aggregation(self, client):
+        src = "trainweak_phase"
+        with SessionLocal() as db:
+            # apertura: ply <= 20 (indipendentemente dal materiale sul FEN)
+            _seed_analysis_row(
+                db, "twp1", src, ply=5, player_color="white",
+                fen_before=chess.Board().fen(), played_uci="e2e4",
+                best_move_uci="e2e4", classification="good", loss_cp=0, score_cp=10,
+            )
+            # mediogioco: ply > 20, materiale residuo abbondante
+            middlegame_fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1"
+            _seed_analysis_row(
+                db, "twp2", src, ply=25, player_color="white",
+                fen_before=middlegame_fen, played_uci="f1c4",
+                best_move_uci="f1b5", classification="mistake", loss_cp=100, score_cp=-50,
+            )
+            # finale: ply > 20, materiale residuo sotto soglia
+            endgame_fen = "8/8/4k3/8/4P3/4K3/8/8 w - - 0 40"
+            _seed_analysis_row(
+                db, "twp3", src, ply=41, player_color="white",
+                fen_before=endgame_fen, played_uci="e3d4",
+                best_move_uci="e3f4", classification="blunder", loss_cp=300, score_cp=-200,
+            )
+            db.commit()
+
+        r = client.get("/training/weaknesses", params={"source": src})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["by_phase"]["opening"] == {"avg_loss_cp": 0.0, "count": 1}
+        assert data["by_phase"]["middlegame"] == {"avg_loss_cp": 100.0, "count": 1}
+        assert data["by_phase"]["endgame"] == {"avg_loss_cp": 300.0, "count": 1}
+        assert "note" in data
+
+    def test_empty_history(self, client):
+        r = client.get("/training/weaknesses", params={"source": "trainweak_empty"})
+        data = r.json()
+        for phase in ("opening", "middlegame", "endgame"):
+            assert data["by_phase"][phase] == {"avg_loss_cp": None, "count": 0}
+        for theme in ("fork", "pin", "king_safety"):
+            assert data["by_theme"][theme] == {"missed_count": 0}
+
+    def test_theme_fork_missed(self, client):
+        src = "trainweak_fork"
+        fen = "r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1"
+        with SessionLocal() as db:
+            _seed_analysis_row(
+                db, "twf1", src, ply=30, player_color="white",
+                fen_before=fen, played_uci="b5a3",  # ritirata, non forchetta
+                best_move_uci="b5c7",  # Nc7+ forchetta re+torre
+                classification="blunder", loss_cp=300, score_cp=-200,
+            )
+            db.commit()
+
+        data = client.get("/training/weaknesses", params={"source": src}).json()
+        assert data["by_theme"]["fork"]["missed_count"] == 1
+        assert data["by_theme"]["pin"]["missed_count"] == 0
+        assert data["by_theme"]["king_safety"]["missed_count"] == 0
+
+    def test_theme_pin_missed(self, client):
+        src = "trainweak_pin"
+        fen = "4k3/8/8/8/4n3/8/8/K6R w - - 0 1"
+        with SessionLocal() as db:
+            _seed_analysis_row(
+                db, "twpin1", src, ply=30, player_color="white",
+                fen_before=fen, played_uci="h1g1",  # non inchioda
+                best_move_uci="h1e1",  # Re1 inchioda il cavallo al re
+                classification="mistake", loss_cp=100, score_cp=-50,
+            )
+            db.commit()
+
+        data = client.get("/training/weaknesses", params={"source": src}).json()
+        assert data["by_theme"]["pin"]["missed_count"] == 1
+        assert data["by_theme"]["fork"]["missed_count"] == 0
+
+    def test_theme_king_safety_missed(self, client):
+        src = "trainweak_king"
+        fen = "6k1/8/8/8/8/8/5PPP/R5K1 w - - 0 1"
+        with SessionLocal() as db:
+            _seed_analysis_row(
+                db, "twk1", src, ply=30, player_color="white",
+                fen_before=fen, played_uci="g2g4",  # rompe lo scudo pedonale
+                best_move_uci="a1a2",  # mossa neutra, scudo intatto
+                classification="blunder", loss_cp=250, score_cp=-150,
+            )
+            db.commit()
+
+        data = client.get("/training/weaknesses", params={"source": src}).json()
+        assert data["by_theme"]["king_safety"]["missed_count"] == 1
+
+    def test_themes_ignore_non_blunder_mistake_rows(self, client):
+        """Le righe 'good'/'inaccuracy' non contribuiscono ai temi tattici
+        (solo blunder/mistake, coerente con la generazione puzzle)."""
+        src = "trainweak_good"
+        fen = "r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1"
+        with SessionLocal() as db:
+            _seed_analysis_row(
+                db, "twg1", src, ply=30, player_color="white",
+                fen_before=fen, played_uci="b5c7",  # la stessa forchetta, ma...
+                best_move_uci="b5c7",
+                classification="good", loss_cp=0, score_cp=50,  # ...è la mossa "good"
+            )
+            db.commit()
+
+        data = client.get("/training/weaknesses", params={"source": src}).json()
+        assert data["by_theme"]["fork"]["missed_count"] == 0
+
+
+# -------------------------------------------------------------------
+# GET /training/endgames + POST /training/endgames/{id}/start
+# -------------------------------------------------------------------
+
+class TestTrainingEndgames:
+    def test_list_endgames(self, client):
+        r = client.get("/training/endgames")
+        assert r.status_code == 200
+        data = r.json()["endgames"]
+        assert 15 <= len(data) <= 20
+        ids = {d["id"] for d in data}
+        # set minimo richiesto dalla spec (docs/training-mode.md)
+        for required in ("kq_vs_k", "kr_vs_k", "kp_opposition_win", "lucena", "philidor"):
+            assert required in ids
+        for d in data:
+            assert d["goal"] in ("win", "draw")
+            assert chess.Board(d["fen"]).is_valid()  # ogni FEN dev'essere una posizione legale
+            assert d["description"]
+
+    def test_start_endgame_white_to_move(self, client):
+        r = client.post(
+            "/training/endgames/kr_vs_k/start",
+            json={"player_color": "white", "engine_elo": 800},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["endgame_id"] == "kr_vs_k"
+        assert data["goal"] == "win"
+        assert data["fen"] == "4k3/8/8/8/8/8/8/R3K3 w - - 0 1"
+        assert data["move_history"] == []  # bianco al tratto, player bianco: nessuna mossa engine
+        assert data["turn"] == "white"
+
+        with SessionLocal() as db:
+            row = db.get(Game, data["game_id"])
+            assert row is not None
+            assert row.source == "endgame_drill"
+            assert row.start_fen == "4k3/8/8/8/8/8/8/R3K3 w - - 0 1"
+
+    def test_start_endgame_black_to_move_no_engine_autoplay(self, client):
+        """La FEN di philidor ha il NERO al tratto: se il player sceglie
+        nero, l'engine non deve muovere per primo (fix Fase 4 di un bug
+        latente in _create_new_game, vedi CLAUDE.md)."""
+        r = client.post(
+            "/training/endgames/philidor/start",
+            json={"player_color": "black", "engine_elo": 800},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["turn"] == "black"
+        assert data["move_history"] == []
+        assert data["last_engine_move"] is None
+
+    def test_start_endgame_engine_opens_when_color_mismatched(self, client):
+        """Se il player sceglie un colore diverso da quello al tratto sulla
+        FEN del drill, l'engine deve aprire la partita (coerente con
+        POST /game/new per la posizione standard)."""
+        r = client.post(
+            "/training/endgames/philidor/start",  # nero al tratto
+            json={"player_color": "white", "engine_elo": 800},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["move_history"]) == 1
+        assert data["last_engine_move"] is not None
+        assert data["turn"] == "white"
+
+    def test_start_endgame_unknown_id_404(self, client):
+        r = client.post(
+            "/training/endgames/does-not-exist/start",
+            json={"player_color": "white", "engine_elo": 800},
+        )
+        assert r.status_code == 404
+
+    def test_start_endgame_invalid_color(self, client):
+        r = client.post(
+            "/training/endgames/kr_vs_k/start",
+            json={"player_color": "red", "engine_elo": 800},
+        )
+        assert r.status_code == 422
