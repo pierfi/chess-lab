@@ -6,6 +6,7 @@
 - `architecture.md` — Architettura del sistema (da creare in Fase 2)
 - `api.md` — Riferimento endpoint API
 - `bugs.md` — Bug tracker locale
+- `en-passant-bug7-deepdive.md` — Approfondimento tecnico standalone del Bug #7 (`bugs.md`): analisi della segnalazione "mossa illegale" `10. cxd6`, verificata come cattura en passant legale con `python-chess` come ground truth
 - `improvements.md` — Registro miglioramenti non-bug: refinement UX, feature piccole fuori roadmap, anticipazioni di roadmap
 - `training-mode.md` — Analisi di design per l'allenamento mirato (Fase 4: puzzle, SRS, debolezze, finali)
 - `coach-mode.md` — Analisi di design per la modalità Coach (Fase 7)
