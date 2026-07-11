@@ -31,6 +31,11 @@ Thumbs.db
 .env
 .env.local
 
+# SQLite database (runtime, non versionato) — incluso WAL/shm
+*.db
+*.db-wal
+*.db-shm
+
 # Claude Code local state (personal, not project source)
 .claude/settings.local.json
 .claude/projects/
