@@ -811,6 +811,84 @@ body {
 
 .growth-chart .ec-pt { cursor: default; }
 .chart-note { font-size: 11px; color: var(--text-dim); margin-top: 8px; }
+
+/* ---------- Allenamento (Fase 4 frontend) ---------- */
+.train-grid { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 16px; }
+@media (min-width: 860px) { .train-grid { grid-template-columns: 1fr 1fr; align-items: start; } }
+
+.puzzle-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.puzzle-meta .badge { font-size: 11px; padding: 2px 8px; }
+.puzzle-review-tag { font-size: 11px; color: var(--text-dim); border: 1px solid var(--border); border-radius: 8px; padding: 1px 7px; }
+
+.puzzle-feedback { font-size: 14px; min-height: 20px; margin-bottom: 6px; }
+.puzzle-feedback.ok { color: var(--green); font-weight: bold; }
+.puzzle-feedback.ko { color: var(--red); font-weight: bold; }
+.puzzle-sub { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; min-height: 16px; }
+.puzzle-actions { display: flex; gap: 8px; }
+
+/* Barre debolezze: una sola serie per gruppo (magnitudine), un solo colore,
+   identità nel testo della riga, valore sempre in chiaro accanto alla barra */
+.train-bar-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 13px; }
+.train-bar-row .tb-label { flex: 0 0 96px; }
+.train-bar-row .tb-track {
+  flex: 1;
+  height: 10px;
+  background: var(--surface);
+  border: 1px solid #eee;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.train-bar-row .tb-fill { height: 100%; background: var(--blue); border-radius: 0 4px 4px 0; }
+.train-bar-row .tb-val { flex: 0 0 auto; min-width: 104px; text-align: right; color: var(--text-dim); font-size: 12px; }
+.weak-note { font-size: 11px; color: var(--text-dim); font-style: italic; margin-top: 10px; }
+.weak-subhead { font-size: 12px; color: var(--text-dim); margin: 12px 0 4px; }
+
+.eg-list { max-height: 430px; overflow-y: auto; }
+
+.eg-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid #eee;
+  font-size: 13px;
+}
+
+.eg-row:last-child { border-bottom: none; }
+.eg-row .eg-text { flex: 1; min-width: 0; }
+.eg-row .eg-name { font-weight: bold; }
+.eg-row .eg-desc { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
+.eg-goal {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: bold;
+  color: #fff;
+  border-radius: 8px;
+  padding: 2px 8px;
+}
+
+.eg-goal.win { background: var(--green); }
+.eg-goal.draw { background: var(--blue); }
+
+.eg-elo-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); margin-bottom: 10px; }
+.eg-elo-row select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
 </style>
 </head>
 <body>
@@ -818,6 +896,7 @@ body {
 <nav class="topnav">
   <span class="brand">Chess Lab</span>
   <button data-view="play" class="active" onclick="showView('play')">Gioca</button>
+  <button data-view="training" onclick="showView('training')">Allenamento</button>
   <button data-view="history" onclick="showView('history')">Storico</button>
   <button data-view="growth" onclick="showView('growth')">Crescita</button>
 </nav>
@@ -958,6 +1037,50 @@ body {
   <div class="card">
     <h3>Ultime 10 partite</h3>
     <div class="stats-grid" id="recent-stats" style="margin-bottom:0"></div>
+  </div>
+</div>
+
+<!-- Vista Allenamento (Fase 4 frontend): puzzle dai propri errori + profilo
+     debolezze + drill di finali teorici. Tutta l'API è già pronta lato backend. -->
+<div class="view" id="view-training" style="display:none">
+  <div class="app">
+    <div class="board-area">
+      <div class="board-container">
+        <div id="puzzle-board"></div>
+        <div class="status-bar" id="puzzle-status"></div>
+      </div>
+    </div>
+    <div class="sidebar">
+      <div class="card">
+        <h3>Puzzle dai tuoi errori</h3>
+        <div class="puzzle-meta" id="puzzle-meta"></div>
+        <div class="puzzle-feedback" id="puzzle-feedback"></div>
+        <div class="puzzle-sub" id="puzzle-sub"></div>
+        <div class="puzzle-actions">
+          <button class="btn btn-primary" id="puzzle-next-btn" onclick="loadPuzzle(true)">Prossimo puzzle</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="train-grid">
+    <div class="card">
+      <h3>Debolezze probabili</h3>
+      <div id="weakness-content"></div>
+      <div class="weak-note" id="weakness-note"></div>
+    </div>
+    <div class="card">
+      <h3>Drill di finali teorici</h3>
+      <div class="eg-elo-row">
+        <span>Forza avversario</span>
+        <select id="eg-elo" title="ELO dell'engine nel drill">
+          <option value="1300">ELO 1300</option>
+          <option value="1700">ELO 1700</option>
+          <option value="2400" selected>ELO 2400 (consigliato)</option>
+        </select>
+      </div>
+      <div class="eg-list" id="endgame-list"></div>
+    </div>
   </div>
 </div>
 
@@ -1787,24 +1910,38 @@ function submitSetup() {
   handleNewGame();
 }
 
-function handleNewGame() {
+// Azione confermata dal modal "partita in corso": la nuova partita standard
+// (startGame) oppure l'avvio di un drill di finali dalla vista Allenamento.
+let pendingStart = null;
+
+function requestGameStart(fn) {
   if (state.gameId && !state.isGameOver && state.moveHistory.length > 0) {
+    pendingStart = fn;
     document.getElementById('confirm-overlay').classList.add('visible');
     return;
   }
-  startGame();
+  fn();
+}
+
+function handleNewGame() {
+  requestGameStart(startGame);
 }
 
 function dismissConfirm() {
+  pendingStart = null;
   document.getElementById('confirm-overlay').classList.remove('visible');
 }
 
 function confirmNewGame() {
   document.getElementById('confirm-overlay').classList.remove('visible');
-  startGame();
+  const fn = pendingStart || startGame;
+  pendingStart = null;
+  fn();
 }
 
-async function startGame() {
+// Reset condiviso della vista Gioca prima di iniziare una qualsiasi nuova
+// partita (standard o drill di finali): banner, analisi, selezione, hint.
+function resetPlayUi() {
   document.getElementById('game-over-banner').classList.remove('visible');
   document.getElementById('analysis').classList.remove('visible');
   state.selectedSq = null;
@@ -1817,7 +1954,10 @@ async function startGame() {
   hintSeq++;               // invalidate any in-flight hint from the previous game
   state.hint = null;
   state.hintLoading = false;
+}
 
+async function startGame() {
+  resetPlayUi();
   setStatus('Creazione partita...');
   try {
     const r = await fetch(API + '/game/new', {
@@ -2027,15 +2167,17 @@ let currentView = 'play';
 function showView(name) {
   currentView = name;
   document.getElementById('view-play').style.display = name === 'play' ? 'flex' : 'none';
+  document.getElementById('view-training').style.display = name === 'training' ? 'block' : 'none';
   document.getElementById('view-history').style.display = name === 'history' ? 'block' : 'none';
   document.getElementById('view-growth').style.display = name === 'growth' ? 'block' : 'none';
   document.querySelectorAll('.topnav button[data-view]').forEach(b => {
     b.classList.toggle('active', b.dataset.view === name);
   });
-  // Ogni ingresso in Storico/Crescita ricarica i dati dal backend: partite e
-  // analisi possono essere cambiate giocando nella vista Gioca nel frattempo.
+  // Ogni ingresso in Storico/Crescita/Allenamento ricarica i dati dal backend:
+  // partite e analisi possono essere cambiate giocando nella vista Gioca nel frattempo.
   if (name === 'history') { closeReplay(); loadHistory(); }
   else if (name === 'growth') { loadGrowth(); }
+  else if (name === 'training') { loadTraining(); }
 }
 
 // fetch con gestione errori uniforme: HTTP non-ok -> Error con il detail FastAPI
@@ -2443,6 +2585,351 @@ function buildAccuracyChartSvg(prog) {
     ariaLabel: 'Trend accuracy per partita',
     endLabel: points[points.length - 1].v + '%',
   });
+}
+
+// ---------- Allenamento (Fase 4 frontend) ----------
+
+// Stato del pannello Allenamento: il puzzle corrente e l'interazione sulla sua
+// board vivono qui, separati dallo state della partita live (vista Gioca).
+let training = {
+  puzzle: null,        // risposta di GET /training/puzzles/next (se puzzle_id != null)
+  emptyMsg: null,      // messaggio backend quando la coda è vuota
+  loadError: null,
+  selectedSq: null,
+  legalMoves: [],
+  answered: false,
+  answer: null,        // risposta di POST /training/puzzles/{id}/answer
+  submitError: null,   // errore transiente dell'invio risposta
+  loading: false,
+};
+
+let endgames = [];     // lista drill da GET /training/endgames
+
+function loadTraining() {
+  // Il puzzle corrente non viene rifetchato se è ancora in attesa di risposta:
+  // ogni GET /puzzles/next a coda SRS vuota GENERA un nuovo puzzle dal blunder
+  // successivo, e rifetchare a ogni ingresso nella vista orfanerebbe i puzzle
+  // mai tentati (una carta SRS nasce solo alla prima risposta).
+  if (!training.puzzle || training.answered) loadPuzzle(false);
+  else renderPuzzle();
+  loadWeaknesses();
+  loadEndgames();
+}
+
+// ---------- Puzzle dai propri errori ----------
+
+const SOURCE_LABEL = { blunder: 'Blunder', mistake: 'Errore', inaccuracy: 'Imprecisione' };
+
+async function loadPuzzle(force) {
+  if (training.loading) return;
+  if (!force && training.puzzle && !training.answered) { renderPuzzle(); return; }
+  training.loading = true;
+  training.loadError = null;
+  training.submitError = null;
+  training.selectedSq = null;
+  training.legalMoves = [];
+  training.answered = false;
+  training.answer = null;
+  renderPuzzle();
+  try {
+    const data = await fetchJson('/training/puzzles/next');
+    if (data.puzzle_id == null) {
+      training.puzzle = null;
+      training.emptyMsg = data.message || 'Nessun puzzle disponibile.';
+    } else {
+      training.puzzle = data;
+      training.emptyMsg = null;
+    }
+  } catch (e) {
+    training.puzzle = null;
+    training.loadError = e.message;
+  }
+  training.loading = false;
+  renderPuzzle();
+}
+
+function renderPuzzle() {
+  const boardWrap = document.getElementById('puzzle-board');
+  const statusEl = document.getElementById('puzzle-status');
+  const metaEl = document.getElementById('puzzle-meta');
+  const fbEl = document.getElementById('puzzle-feedback');
+  const subEl = document.getElementById('puzzle-sub');
+  const nextBtn = document.getElementById('puzzle-next-btn');
+
+  nextBtn.disabled = training.loading;
+  nextBtn.textContent = training.answered || training.puzzle ? 'Prossimo puzzle' : 'Riprova';
+
+  if (!training.puzzle) {
+    boardWrap.innerHTML = '';
+    metaEl.innerHTML = '';
+    fbEl.className = 'puzzle-feedback';
+    if (training.loading) {
+      statusEl.textContent = 'Caricamento puzzle…';
+      fbEl.textContent = '';
+      subEl.textContent = '';
+    } else if (training.loadError) {
+      statusEl.textContent = '';
+      fbEl.textContent = 'Errore: backend non raggiungibile (' + training.loadError + ')';
+      subEl.textContent = '';
+    } else {
+      statusEl.textContent = 'Nessun puzzle in coda';
+      fbEl.textContent = training.emptyMsg || '';
+      subEl.textContent = 'Gioca qualche partita e usa «Analizza» a fine partita: ogni blunder diventa un puzzle. Nel frattempo puoi provare i drill di finali qui sotto.';
+    }
+    return;
+  }
+
+  const pz = training.puzzle;
+  const sideIt = pz.player_to_move === 'white' ? 'il Bianco' : 'il Nero';
+
+  // Dopo la risposta la board diventa read-only e la mossa migliore viene
+  // evidenziata con lo stesso highlight .last-move della partita live.
+  let lastMove = null;
+  if (training.answered && training.answer) {
+    const best = training.answer.best_move_uci;
+    lastMove = { from: best.slice(0, 2), to: best.slice(2, 4) };
+  }
+
+  boardWrap.innerHTML = '';
+  boardWrap.appendChild(buildBoardEl({
+    fen: pz.fen,
+    orientation: pz.player_to_move,
+    lastMove,
+    selectedSq: training.selectedSq,
+    legalMoves: training.legalMoves,
+    onSquare: training.answered ? null : onPuzzleSquare,
+  }));
+
+  metaEl.innerHTML =
+    '<span class="badge ' + pz.source + '">' + (SOURCE_LABEL[pz.source] || pz.source) + '</span>' +
+    '<span class="puzzle-review-tag">' + (pz.is_review ? 'Ripasso' : 'Nuovo') + '</span>' +
+    '<span>Da una tua partita — trova la mossa migliore</span>';
+
+  if (!training.answered) {
+    statusEl.textContent = 'Muove ' + sideIt;
+    statusEl.className = 'status-bar status-turn';
+    fbEl.className = 'puzzle-feedback' + (training.submitError ? ' ko' : '');
+    fbEl.textContent = training.submitError ? 'Errore invio risposta: ' + training.submitError : '';
+    subEl.textContent = 'Clicca un pezzo e poi la casella di destinazione.';
+    return;
+  }
+
+  const ans = training.answer;
+  statusEl.textContent = 'Mossa migliore: ' + fmtUciMove(ans.best_move_uci);
+  statusEl.className = 'status-bar';
+  if (ans.correct) {
+    fbEl.className = 'puzzle-feedback ok';
+    fbEl.textContent = 'Corretto!';
+  } else {
+    fbEl.className = 'puzzle-feedback ko';
+    fbEl.textContent = 'Sbagliato — hai giocato ' + fmtUciMove(ans.playedUci) + ', la mossa migliore era ' + fmtUciMove(ans.best_move_uci);
+  }
+  subEl.textContent = 'Prossimo ripasso tra ' + ans.interval_days +
+    (ans.interval_days === 1 ? ' giorno' : ' giorni') +
+    ' · serie corrette: ' + ans.correct_streak;
+}
+
+function fmtUciMove(uci) {
+  if (!uci) return '?';
+  let s = uci.slice(0, 2) + '→' + uci.slice(2, 4);
+  if (uci.length > 4) s += '=' + uci[4].toUpperCase();
+  return s;
+}
+
+// Stessa interazione click-click della board live (seleziona pezzo proprio →
+// clicca destinazione), ma sullo stato del puzzle: la validazione vera resta
+// il match sul backend, i candidati client-side sono solo un aiuto visivo.
+async function onPuzzleSquare(sq) {
+  if (!training.puzzle || training.answered || training.loading) return;
+  const pz = training.puzzle;
+  const color = pz.player_to_move;
+  const pieceMap = fenToMap(pz.fen);
+
+  if (training.selectedSq) {
+    if (training.selectedSq === sq) {
+      training.selectedSq = null;
+      training.legalMoves = [];
+      renderPuzzle();
+      return;
+    }
+    const move = training.legalMoves.find(m => m.to === sq);
+    if (move) {
+      let uci = move.from + move.to;
+      if (move.promo) uci += await askPromotion(color);
+      await submitPuzzleAnswer(uci);
+      return;
+    }
+  }
+
+  const piece = pieceMap[sq];
+  if (piece) {
+    const isOwn = color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase();
+    if (isOwn) {
+      training.selectedSq = sq;
+      training.legalMoves = generateMoveCandidates(pz.fen, sq, color);
+      renderPuzzle();
+      return;
+    }
+  }
+
+  training.selectedSq = null;
+  training.legalMoves = [];
+  renderPuzzle();
+}
+
+async function submitPuzzleAnswer(uci) {
+  training.selectedSq = null;
+  training.legalMoves = [];
+  training.loading = true;
+  renderPuzzle();
+  try {
+    const data = await fetchJson('/training/puzzles/' + training.puzzle.puzzle_id + '/answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ move_uci: uci }),
+    });
+    data.playedUci = uci;
+    training.answer = data;
+    training.answered = true;
+    training.submitError = null;
+    playSound(data.correct ? 'check' : 'capture');
+  } catch (e) {
+    training.submitError = e.message;
+  }
+  training.loading = false;
+  renderPuzzle();
+}
+
+// ---------- Profilo debolezze ----------
+
+const PHASE_LABEL = { opening: 'Apertura', middlegame: 'Mediogioco', endgame: 'Finale' };
+const THEME_LABEL = { fork: 'Forchette', pin: 'Inchiodature', king_safety: 'Re esposto' };
+
+async function loadWeaknesses() {
+  const el = document.getElementById('weakness-content');
+  const noteEl = document.getElementById('weakness-note');
+  el.innerHTML = '<div class="hist-msg">Caricamento&hellip;</div>';
+  noteEl.textContent = '';
+  try {
+    const data = await fetchJson('/training/weaknesses');
+    renderWeaknesses(data);
+  } catch (e) {
+    el.innerHTML = '<div class="hist-msg">Errore: backend non raggiungibile (' + e.message + ')</div>';
+  }
+}
+
+// Barra orizzontale con etichetta a sinistra e valore SEMPRE in testo a destra:
+// la lunghezza è relativa al massimo del proprio gruppo, mai tra gruppi diversi.
+function weaknessBarRow(label, value, maxValue, valText) {
+  const pct = maxValue > 0 && value != null ? Math.round((value / maxValue) * 100) : 0;
+  return '<div class="train-bar-row">' +
+    '<span class="tb-label">' + label + '</span>' +
+    '<div class="tb-track"><div class="tb-fill" style="width:' + pct + '%"></div></div>' +
+    '<span class="tb-val">' + valText + '</span></div>';
+}
+
+function renderWeaknesses(data) {
+  const el = document.getElementById('weakness-content');
+  const noteEl = document.getElementById('weakness-note');
+  const phases = data.by_phase || {};
+  const themes = data.by_theme || {};
+
+  const totalMoves = Object.values(phases).reduce((a, p) => a + (p.count || 0), 0);
+  if (totalMoves === 0) {
+    el.innerHTML = '<div class="hist-msg">Nessuna partita analizzata: gioca e usa &laquo;Analizza&raquo; a fine partita per popolare il profilo.</div>';
+    noteEl.textContent = '';
+    return;
+  }
+
+  let html = '<div class="weak-subhead">Perdita media (centipawn) per fase di gioco</div>';
+  const maxLoss = Math.max(...Object.values(phases).map(p => p.avg_loss_cp || 0), 0);
+  for (const key of ['opening', 'middlegame', 'endgame']) {
+    const p = phases[key] || {};
+    const valText = p.count
+      ? Math.round(p.avg_loss_cp) + ' cp · ' + p.count + ' mosse'
+      : '— nessuna mossa';
+    html += weaknessBarRow(PHASE_LABEL[key], p.avg_loss_cp, maxLoss, valText);
+  }
+
+  html += '<div class="weak-subhead">Temi tattici probabilmente mancati (blunder/errori)</div>';
+  const maxTheme = Math.max(...Object.values(themes).map(t => t.missed_count || 0), 0);
+  if (maxTheme === 0) {
+    html += '<div class="hist-msg">Nessun tema tattico rilevato negli errori analizzati.</div>';
+  } else {
+    for (const key of ['fork', 'pin', 'king_safety']) {
+      const t = themes[key] || {};
+      html += weaknessBarRow(THEME_LABEL[key], t.missed_count, maxTheme, (t.missed_count || 0) + ' occasioni');
+    }
+  }
+
+  el.innerHTML = html;
+  // Framing esplicito del backend: euristiche, non diagnosi certe.
+  noteEl.textContent = data.note || 'Temi probabili stimati con euristiche, non diagnosi certe.';
+}
+
+// ---------- Drill di finali teorici ----------
+
+async function loadEndgames() {
+  const el = document.getElementById('endgame-list');
+  if (endgames.length > 0) { renderEndgames(); return; }   // lista statica, un fetch basta
+  el.innerHTML = '<div class="hist-msg">Caricamento&hellip;</div>';
+  try {
+    const data = await fetchJson('/training/endgames');
+    endgames = data.endgames || [];
+    renderEndgames();
+  } catch (e) {
+    el.innerHTML = '<div class="hist-msg">Errore: backend non raggiungibile (' + e.message + ')</div>';
+  }
+}
+
+function renderEndgames() {
+  const el = document.getElementById('endgame-list');
+  el.innerHTML = '';
+  endgames.forEach(drill => {
+    const row = document.createElement('div');
+    row.className = 'eg-row';
+    const goalIt = drill.goal === 'win' ? 'Vinci' : 'Patta';
+    row.innerHTML =
+      '<div class="eg-text"><div class="eg-name">' + drill.name + '</div>' +
+      '<div class="eg-desc">' + drill.description + '</div></div>' +
+      '<span class="eg-goal ' + drill.goal + '" title="Obiettivo del drill">' + goalIt + '</span>';
+    const btn = document.createElement('button');
+    btn.className = 'btn';
+    btn.textContent = 'Gioca';
+    btn.title = 'Avvia il drill nella vista Gioca';
+    btn.onclick = () => requestGameStart(() => startEndgameDrill(drill));
+    row.appendChild(btn);
+    el.appendChild(row);
+  });
+}
+
+async function startEndgameDrill(drill) {
+  // Il player gioca il lato al tratto sul FEN del drill (è il lato che ha
+  // l'obiettivo win/draw); l'engine difende/attacca dall'altra parte.
+  const playerColor = drill.fen.split(' ')[1] === 'w' ? 'white' : 'black';
+  const engineElo = parseInt(document.getElementById('eg-elo').value, 10);
+
+  resetPlayUi();
+  showView('play');
+  setStatus('Creazione drill...');
+  try {
+    const data = await fetchJson('/training/endgames/' + drill.id + '/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_color: playerColor, engine_elo: engineElo }),
+    });
+    state.gameId = data.game_id;
+    state.playerColor = data.player_color;
+    state.engineElo = data.engine_elo;
+    playSound('move');
+    updateState(data);
+    // Sovrascrive il "Tocca a te" di updateState con l'obiettivo del drill;
+    // dalla mossa successiva riprende la messaggistica standard.
+    setStatus('Drill &laquo;' + drill.name + '&raquo; — obiettivo: ' +
+      (drill.goal === 'win' ? 'vinci' : 'tieni la patta') + '. Tocca a te', 'status-turn');
+  } catch (e) {
+    setStatus('Errore avvio drill: ' + e.message);
+  }
 }
 
 renderBoard();
