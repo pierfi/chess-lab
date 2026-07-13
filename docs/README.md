@@ -10,6 +10,7 @@
 - `improvements.md` — Registro miglioramenti non-bug: refinement UX, feature piccole fuori roadmap, anticipazioni di roadmap
 - `training-mode.md` — Analisi di design per l'allenamento mirato (Fase 4: puzzle, SRS, debolezze, finali)
 - `coach-mode.md` — Analisi di design per la modalità Coach (Fase 7)
+- `threatened-pieces-design.md` — Analisi di design per l'evidenziazione dei pezzi in presa nella modalità assistita (estensione Fase 2)
 
 ## Risorse esterne utili
 
