@@ -143,3 +143,33 @@ Conferme puntuali:
 **Conclusione:** `10. cxd6` è una **cattura en passant** pienamente regolare secondo le regole FIDE: un pedone che ha appena avanzato di due caselle passando accanto a un pedone avversario può essere catturato *come se* avesse avanzato di una sola casella, nella mossa immediatamente successiva. La cattura avviene per definizione su una casella (d6) diversa da quella occupata dal pedone catturato (d5) — è la mossa più comunemente scambiata per un bug da giocatori casual, esattamente lo scenario qui riportato. Il motore di validazione backend (`chess_app/backend/main.py:209`, `if move not in board.legal_moves: raise HTTPException(400, "Illegal move")`) usa lo stesso identico controllo `python-chess` verificato qui, quindi non c'è discrepanza tra il check indipendente e la logica applicativa: se la mossa fosse stata davvero illegale, il backend l'avrebbe rifiutata con 400.
 
 **Nessuna modifica al codice.** Non è stata toccata né la validazione backend (`main.py`) né l'euristica frontend `generateMoveCandidates()` (che gestisce l'en passant fin dal fix del Bug #4) — non ce n'era motivo, il comportamento osservato è corretto. Il gap è nel modello mentale della regola en passant lato utente, non nel codice.
+
+---
+
+## Bug #8 — `POST /game/analyze` ignora `start_fen`: richiesta appesa per sempre + leak di processi Stockfish
+
+**File:** `backend/main.py` → `analyze_game()`, righe ~801 e ~815
+**Priorità:** Alta
+**Stato:** Trovato il 13 luglio 2026 durante una revisione generale del progetto post-iniziativa a 5 fasi (`docs/project-state-review.md`). **Non ancora fixato.**
+
+**Problema:** `analyze_game()` ricostruisce la partita da rianalizzare usando due board hardcodate alla posizione di partenza standard — `board = chess.Board()` (riga ~801) e `scratch_board = chess.Board()` (riga ~815) — ignorando `game["start_fen"]`. Ogni altro punto del backend (`_load_game_from_db`, `_board_to_state`, `_build_pgn`, `_create_new_game`) onora correttamente `start_fen`; solo `analyze_game()` no. Per una partita iniziata da FEN custom (drill di finali di Fase 4, o un import PGN con header `FEN`), le mosse persistite vengono rigiocate sulla board sbagliata: la board finisce corrotta e Stockfish riceve posizioni incoerenti con le mosse fornite.
+
+**Riproduzione verificata:** `POST /training/endgames/kr_vs_k/start` → una mossa → `POST /game/analyze`. `python-chess` solleva `EngineError: illegal uci ...` **dentro** il protocollo UCI, e la chiamata `analyse()` non ritorna mai: la richiesta HTTP resta appesa a tempo indefinito (un thread del threadpool perso ad ogni tentativo), il processo Stockfish resta orfano, e in frontend il bottone "Analizza" gira all'infinito. Il server nel complesso resta responsivo, ma ogni retry dell'utente consuma un thread e un processo Stockfish in più.
+
+**Impatto:** qualsiasi drill di finali (Fase 4) e qualsiasi import PGN con header `FEN` sono di fatto inanalizzabili — niente accuracy, niente `analysis_results` persistiti, niente puzzle generabili da quelle partite. Le partite standard (la stragrande maggioranza) non sono toccate.
+
+**Causa:** è il punto d'incrocio tra due feature costruite in fasi diverse — l'analisi (Fase 1/MVP) e `start_fen` (Fase 3 schema, Fase 4 primo consumer reale) — che nessuna delle due passate ha ri-verificato incrociata con l'altra. Coerente con il gap di test coverage individuato nella stessa revisione: nessun test esistente analizza una partita con `start_fen`.
+
+**Fix stimato (non ancora applicato):** sostituire le due `chess.Board()` con `_starting_board(game.get("start_fen"))` — l'helper esiste già ed è usato ovunque nel resto del file — in entrambi i punti (righe ~801 e ~815). Aggiungere due test di regressione: analisi di un drill avviato via `/training/endgames/{id}/start` e analisi di un import con header `FEN`. Vedi anche Bug #9 (stesso file, correlato) per un fix contestuale nello stesso intervento.
+
+---
+
+## Bug #9 — `move_number` errato in `/game/analyze` per partite con nero al tratto dalla posizione iniziale
+
+**File:** `backend/main.py` → `analyze_game()`, riga ~875
+**Priorità:** Bassa (bloccato/mascherato da Bug #8 — riemerge non appena quello viene fixato)
+**Stato:** Trovato il 13 luglio 2026, stessa revisione di Bug #8. **Non ancora fixato.**
+
+**Problema:** `move_number = (ply_idx // 2) + 1` assume che il ply 1 sia sempre del Bianco. Per uno `start_fen` col Nero al tratto (es. drill Philidor), il ply 1 (Nero) e il ply 2 (Bianco) ricevono lo stesso `move_number`, con i colori invertiti rispetto alla realtà — la tabella a due colonne del pannello di analisi (Fase 3, `buildAnalysisMovesHtml()`) raggrupperebbe le semimosse nelle righe sbagliate.
+
+**Nota:** oggi non osservabile in pratica perché Bug #8 blocca del tutto l'analisi di queste partite prima che si arrivi al calcolo di `move_number`. Va corretto **insieme** a Bug #8 nello stesso intervento, altrimenti il fix di #8 lo fa riemergere subito. Pattern di fix noto e già usato altrove: derivare il colore/turno di partenza da `board.turn` della posizione iniziale, lo stesso approccio già adottato in `_create_new_game` dal fix collaterale di Fase 4 (vedi `docs/status.md`).

@@ -5,9 +5,9 @@ rileggere l'intera cronologia. Per il piano di fase completo (schema DB, endpoin
 vedi `CLAUDE.md` → sezione "Roadmap fasi" e la memoria di progetto
 `project_chess_lab_persistence_analytics`. Questo file è solo lo **snapshot dei branch in volo**.
 
-Ultimo aggiornamento: **11 luglio 2026** (sessione in pausa per limite di utilizzo al 90%).
+Ultimo aggiornamento: **13 luglio 2026** (sessione in pausa per crediti esauriti, ripresa prevista il giorno dopo).
 
-**Nota di ripresa:** i due agenti background (`feature/history-growth-ui` su Fable, `feature/training-backend` su Opus) sono task asincroni gestiti dall'infrastruttura, non dalla sessione: continuano a girare anche se questa sessione si interrompe. Alla ripresa, controllare prima lo stato di questi due branch/worktree (vedi tabella sotto) prima di rilanciare qualsiasi cosa — se hanno già finito, verificarli (test, no co-author trailer, working tree pulito) e pushare prima di procedere oltre.
+**Nota di ripresa — PRIORITÀ:** durante una revisione generale del progetto (Fable, `docs/project-state-review.md`, già mergiata) è emerso un **bug reale e serio, non ancora fixato**: `POST /game/analyze` ignora `start_fen` e va in hang permanente (con leak di processi Stockfish) su qualsiasi drill di finali o import PGN con header `FEN`. Documentato come **Bug #8** in `docs/bugs.md` (+ Bug #9 correlato, `move_number` errato per partite col nero al tratto dalla posizione iniziale — va fixato insieme). Fix stimato ~2 righe + test di regressione (l'helper `_starting_board()` esiste già). **Questo è il primo task da fare alla ripresa**, prima di qualsiasi nuova feature.
 
 ---
 
@@ -25,16 +25,17 @@ Ultimo aggiornamento: **11 luglio 2026** (sessione in pausa per limite di utiliz
 
 | `feature/training-ui` | ✅ **Merged in `main`** (PR #12) | Fase 5 frontend (ultima fase) completa: pannello Allenamento — puzzle solver SRS, dashboard debolezze, selezione drill finali. 93/93 test verdi, verificato live via jsdom su backend isolato (porta 8766, DB scratch, senza toccare il dev server dell'utente). |
 | `docs/en-passant-bug-analysis` | ✅ **Merged in `main`** (PR #11) | Documento di analisi tecnica standalone per Bug #7 (`docs/en-passant-bug7-deepdive.md`) — non è un bug, verifica indipendente con python-chess, nessuna modifica al codice. Fuori dall'iniziativa a 5 fasi. |
-| `docs/threatened-pieces-design` | ✅ Pushed, **pronto per PR** | Valutazione design completa (`docs/threatened-pieces-design.md`, nessuna implementazione): definizione = pezzo attaccato e indifeso (hanging), nuovo endpoint leggero `GET /game/{id}/threats` senza Stockfish, glow inset rosso di contorno. SEE e minacce prospettiche flaggate come v2. |
-| `docs/project-state-review` | 🔄 **In corso** (agente Fable) | Valutazione generale dello stato del progetto post-Fase 5 (codice, test, UX, debito tecnico) richiesta dall'utente — solo documento, nessuna implementazione. Worktree: `.claude/worktrees/project-review`. |
+| `docs/threatened-pieces-design` | ✅ **Merged in `main`** (PR #13) | Valutazione design completa (`docs/threatened-pieces-design.md`, nessuna implementazione): definizione = pezzo attaccato e indifeso (hanging), nuovo endpoint leggero `GET /game/{id}/threats` senza Stockfish, glow inset rosso di contorno. SEE e minacce prospettiche flaggate come v2. |
+| `docs/project-state-review` | ✅ Pushed, **pronto per PR** | Valutazione generale dello stato del progetto post-Fase 5 (`docs/project-state-review.md`): punti di forza (write-through cache, `buildBoardEl()` condiviso), debito tecnico (due "epoche" di stile nel frontend, `fetchJson()` vs raw-fetch divergenti), **3 bug non tracciati trovati e ora documentati come Bug #8/#9/(FEN mancante nel drill `rook_pawn_win`)**, gap di test coverage (nessun test incrocia `start_fen`×analyze, SRS review-queue, promozione). Miglioramento rapido consigliato: fix Bug #8+#9 (~1 ora). Investimento strutturale consigliato: split di `index.html` in file `<script src>` separati + commit dell'harness jsdom riusato 3 volte e mai salvato. |
 
 ## Prossimi passi, in ordine
 
-**L'iniziativa persistenza + storia + allenamento a 5 fasi è conclusa** (tutte le PR mergiate: #7, #8, #9, #10, #12).
+**L'iniziativa persistenza + storia + allenamento a 5 fasi è conclusa** (tutte le PR mergiate: #7, #8, #9, #10, #12, #13).
 
-1. L'utente apre la PR per `docs/threatened-pieces-design` (solo documentazione, nessun codice) — poi decide se e quando implementare la feature (v1 = definizione hanging, endpoint `/game/{id}/threats`).
-2. Attendere fine `docs/project-state-review` (Fable) — solo documento, nessuna implementazione.
-3. In coda (non lanciata): scacchiera ridimensionabile drag-to-resize, scopata in `docs/improvements.md`.
+1. **Priorità: fixare Bug #8 + Bug #9** (`docs/bugs.md`) — `analyze_game()` in `backend/main.py` righe ~801/~815, sostituire `chess.Board()` con `_starting_board(game.get("start_fen"))`, più fix `move_number` riga ~875, più 2 test di regressione (drill + import con header FEN). Piccolo, ben scoped — buon candidato Sonnet.
+2. L'utente apre la PR per `docs/project-state-review` (solo documentazione).
+3. Verificare anche la nota del review sul FEN mancante nel drill `rook_pawn_win` (`GET /training/endgames`) — bug minore, non ancora in `docs/bugs.md`, da aggiungere se confermato.
+4. In coda (non lanciate): scacchiera ridimensionabile drag-to-resize (`docs/improvements.md`); implementazione dell'overlay "pezzi in presa" (design pronto in `docs/threatened-pieces-design.md`, in attesa di via libera dell'utente); investimento strutturale sul frontend (split file + harness di test).
 
 ## Da non dimenticare
 
