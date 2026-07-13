@@ -8,6 +8,7 @@
 - `bugs.md` — Bug tracker locale
 - `en-passant-bug7-deepdive.md` — Approfondimento tecnico standalone del Bug #7 (`bugs.md`): analisi della segnalazione "mossa illegale" `10. cxd6`, verificata come cattura en passant legale con `python-chess` come ground truth
 - `improvements.md` — Registro miglioramenti non-bug: refinement UX, feature piccole fuori roadmap, anticipazioni di roadmap
+- `project-state-review.md` — Valutazione dello stato del progetto post-iniziativa a 5 fasi (13 luglio 2026): punti di forza, debito tecnico, bug non tracciati, priorità suggerite
 - `training-mode.md` — Analisi di design per l'allenamento mirato (Fase 4: puzzle, SRS, debolezze, finali)
 - `coach-mode.md` — Analisi di design per la modalità Coach (Fase 7)
 
