@@ -11,6 +11,7 @@
 - `project-state-review.md` — Valutazione dello stato del progetto post-iniziativa a 5 fasi (13 luglio 2026): punti di forza, debito tecnico, bug non tracciati, priorità suggerite
 - `training-mode.md` — Analisi di design per l'allenamento mirato (Fase 4: puzzle, SRS, debolezze, finali)
 - `coach-mode.md` — Analisi di design per la modalità Coach (Fase 7)
+- `threatened-pieces-design.md` — Analisi di design per l'evidenziazione dei pezzi in presa nella modalità assistita (estensione Fase 2)
 
 ## Risorse esterne utili
 
