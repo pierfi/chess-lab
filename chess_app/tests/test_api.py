@@ -726,6 +726,23 @@ SAMPLE_PGN = """[Event "Test"]
 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O 1-0
 """
 
+# PGN con header FEN custom (Nero al tratto — Bug #8/#9): stessa posizione di
+# Philidor usata dal drill di finali. Copertura del gap esplicitamente
+# segnalato in docs/bugs.md: nessun test incrociava start_fen (via import) con
+# /game/analyze prima di questo fix.
+FEN_PGN = """[Event "Test"]
+[Site "?"]
+[Date "2026.07.17"]
+[Round "1"]
+[White "A"]
+[Black "B"]
+[Result "*"]
+[FEN "8/8/8/3k4/8/3K4/3P4/3r4 b - - 0 1"]
+[SetUp "1"]
+
+1...Rxd2 2.Kxd2 *
+"""
+
 
 class TestImportPgn:
     def test_import_creates_game_and_moves(self, client):
@@ -772,6 +789,32 @@ class TestImportPgn:
     def test_import_empty_string_rejected(self, client):
         r = client.post("/games/import", json={"pgn": ""})
         assert r.status_code == 400
+
+    def test_import_with_fen_header_is_analyzable(self, client):
+        """Bug #8/#9 regression: un import con header FEN (Nero al tratto)
+        deve restare analizzabile — prima del fix, analyze_game() ignorava
+        start_fen e la chiamata restava appesa a tempo indefinito."""
+        r = client.post("/games/import", json={"pgn": FEN_PGN})
+        assert r.status_code == 200
+        data = r.json()
+        gid = data["game_id"]
+        assert data["source"] == "import"
+        assert len(data["move_history"]) == 2
+
+        r = client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        assert r.status_code == 200
+        analysis = r.json()
+        assert analysis["total_moves"] == 2
+
+        # Ply 1 è del Nero (start_fen col Nero al tratto): move_number deve
+        # riflettere questo, non assumere Bianco-first (Bug #9).
+        ply1, ply2 = analysis["moves"]
+        assert ply1["color"] == "black"
+        assert ply1["move_uci"] == "d1d2"
+        assert ply1["move_number"] == 1
+        assert ply2["color"] == "white"
+        assert ply2["move_uci"] == "d3d2"
+        assert ply2["move_number"] == 2
 
 
 # -------------------------------------------------------------------
@@ -1436,3 +1479,91 @@ class TestTrainingEndgames:
             json={"player_color": "red", "engine_elo": 800},
         )
         assert r.status_code == 422
+
+
+# -------------------------------------------------------------------
+# Bug #8/#9 regression: POST /game/analyze su una partita con start_fen
+# custom. Prima del fix, analyze_game() ignorava start_fen e la chiamata
+# restava appesa a tempo indefinito (leak di processi Stockfish) su qualsiasi
+# drill di finali o import PGN con header FEN. Vedi docs/bugs.md.
+# -------------------------------------------------------------------
+class TestAnalyzeStartFen:
+    def test_analyze_endgame_drill_white_to_move(self, client):
+        """kr_vs_k: FEN standard col Bianco al tratto — copre Bug #8 (analisi
+        non deve appendersi/fallire) sul percorso più comune."""
+        start = client.post(
+            "/training/endgames/kr_vs_k/start",
+            json={"player_color": "white", "engine_elo": 800},
+        )
+        assert start.status_code == 200
+        gid = start.json()["game_id"]
+
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e1e2"})
+        assert r.status_code == 200
+
+        r = client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        assert r.status_code == 200
+        analysis = r.json()
+        assert analysis["total_moves"] >= 1
+        ply1 = analysis["moves"][0]
+        assert ply1["color"] == "white"
+        assert ply1["move_number"] == 1
+        assert ply1["move_uci"] == "e1e2"
+
+    def test_analyze_endgame_drill_black_to_move_philidor(self, client):
+        """Drill Philidor: FEN col Nero al tratto — copre sia Bug #8 (analisi
+        di un drill deve funzionare, non appendersi) sia Bug #9 (move_number
+        deve trattare il ply 1 come Nero, non assumere Bianco-first)."""
+        start = client.post(
+            "/training/endgames/philidor/start",
+            json={"player_color": "black", "engine_elo": 800},
+        )
+        assert start.status_code == 200
+        data = start.json()
+        gid = data["game_id"]
+        assert data["turn"] == "black"
+        assert data["move_history"] == []  # nessun autoplay engine, nero già al tratto
+
+        # Rxd2 — unica mossa che cattura il pedone bianco, dà scacco e forza
+        # una risposta immediata dell'engine (stesso /game/move gestisce
+        # entrambe le semimosse, come per una partita normale).
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "d1d2"})
+        assert r.status_code == 200
+        move_data = r.json()
+        assert len(move_data["move_history"]) == 2  # Nero + risposta Bianco
+
+        r = client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        assert r.status_code == 200
+        analysis = r.json()
+        assert analysis["total_moves"] == 2
+
+        ply1, ply2 = analysis["moves"]
+        assert ply1["color"] == "black"
+        assert ply1["move_uci"] == "d1d2"
+        assert ply1["move_number"] == 1
+        assert ply2["color"] == "white"
+        assert ply2["move_number"] == 2
+
+    def test_analyze_custom_start_fen_via_new_game(self, client):
+        """POST /game/new con start_fen iniettato direttamente (non tramite
+        drill), Bianco al tratto in una posizione custom non-standard: copre
+        il secondo punto d'ingresso di start_fen menzionato in docs/bugs.md."""
+        custom_fen = "8/8/8/8/8/8/4P3/4K2k w - - 0 1"
+        r = client.post(
+            "/game/new",
+            json={"player_color": "white", "engine_elo": 800, "start_fen": custom_fen},
+        )
+        assert r.status_code == 200
+        gid = r.json()["game_id"]
+
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+
+        r = client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        assert r.status_code == 200
+        analysis = r.json()
+        assert analysis["total_moves"] >= 1
+        ply1 = analysis["moves"][0]
+        assert ply1["color"] == "white"
+        assert ply1["move_number"] == 1
+        assert ply1["move_uci"] == "e2e4"

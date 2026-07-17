@@ -798,7 +798,12 @@ def game_hint(game_id: str, req: HintRequest):
 @app.post("/game/analyze")
 def analyze_game(req: AnalyzeRequest):
     game = _get_game(req.game_id)
-    board = chess.Board()
+    board = _starting_board(game.get("start_fen"))
+    # Turno iniziale dedotto dalla board (bianco per la posizione standard,
+    # ma può essere nero per una start_fen custom, es. drill Philidor) —
+    # stesso pattern di _create_new_game, serve per attribuire move_number
+    # correttamente quando il ply 1 non è del Bianco (Bug #9).
+    initial_turn = "white" if board.turn == chess.WHITE else "black"
     moves = game["move_objects"]
 
     if not moves:
@@ -812,7 +817,7 @@ def analyze_game(req: AnalyzeRequest):
         # alla mossa giusta — eval-dopo-mossa-i == eval-prima-mossa-(i+1), quindi
         # ogni posizione viene comunque analizzata una sola volta.
         boards_before = []
-        scratch_board = chess.Board()
+        scratch_board = _starting_board(game.get("start_fen"))
         for move in moves:
             boards_before.append(scratch_board.copy())
             scratch_board.push(move)
@@ -870,9 +875,17 @@ def analyze_game(req: AnalyzeRequest):
                     best_line_san.append(scratch.san(pv_move))
                     scratch.push(pv_move)
 
+            # move_number: raggruppa i ply in coppie Bianco/Nero per la tabella
+            # a due colonne del frontend. La formula classica (ply_idx//2 + 1)
+            # assume ply 1 = Bianco; per uno start_fen col Nero al tratto si
+            # applica un offset di un ply "virtuale" così il primo ply (Nero)
+            # resta da solo nella riga 1 e il Bianco apre la riga 2 (stesso
+            # pattern di _create_new_game: turno iniziale da board.turn, non
+            # hardcoded Bianco-first — Bug #9).
+            effective_ply = ply_idx if initial_turn == "white" else ply_idx + 1
             analysis_moves.append({
                 "ply": ply_idx + 1,
-                "move_number": (ply_idx // 2) + 1,
+                "move_number": (effective_ply // 2) + 1,
                 "color": color,
                 "move_uci": move.uci(),
                 "move_san": move_san,
