@@ -150,7 +150,7 @@ Conferme puntuali:
 
 **File:** `backend/main.py` → `analyze_game()`, righe ~801 e ~815
 **Priorità:** Alta
-**Stato:** Trovato il 13 luglio 2026 durante una revisione generale del progetto post-iniziativa a 5 fasi (`docs/project-state-review.md`). **Non ancora fixato.**
+**Stato:** Trovato il 13 luglio 2026 durante una revisione generale del progetto post-iniziativa a 5 fasi (`docs/project-state-review.md`). **Fixato il 17 luglio 2026** (branch `fix/analyze-start-fen`), insieme a Bug #9.
 
 **Problema:** `analyze_game()` ricostruisce la partita da rianalizzare usando due board hardcodate alla posizione di partenza standard — `board = chess.Board()` (riga ~801) e `scratch_board = chess.Board()` (riga ~815) — ignorando `game["start_fen"]`. Ogni altro punto del backend (`_load_game_from_db`, `_board_to_state`, `_build_pgn`, `_create_new_game`) onora correttamente `start_fen`; solo `analyze_game()` no. Per una partita iniziata da FEN custom (drill di finali di Fase 4, o un import PGN con header `FEN`), le mosse persistite vengono rigiocate sulla board sbagliata: la board finisce corrotta e Stockfish riceve posizioni incoerenti con le mosse fornite.
 
@@ -160,7 +160,7 @@ Conferme puntuali:
 
 **Causa:** è il punto d'incrocio tra due feature costruite in fasi diverse — l'analisi (Fase 1/MVP) e `start_fen` (Fase 3 schema, Fase 4 primo consumer reale) — che nessuna delle due passate ha ri-verificato incrociata con l'altra. Coerente con il gap di test coverage individuato nella stessa revisione: nessun test esistente analizza una partita con `start_fen`.
 
-**Fix stimato (non ancora applicato):** sostituire le due `chess.Board()` con `_starting_board(game.get("start_fen"))` — l'helper esiste già ed è usato ovunque nel resto del file — in entrambi i punti (righe ~801 e ~815). Aggiungere due test di regressione: analisi di un drill avviato via `/training/endgames/{id}/start` e analisi di un import con header `FEN`. Vedi anche Bug #9 (stesso file, correlato) per un fix contestuale nello stesso intervento.
+**Fix applicato (17 luglio 2026):** sostituite le due `chess.Board()` con `_starting_board(game.get("start_fen"))` in entrambi i punti (`board` iniziale e `scratch_board` del pre-computo eval). Test di regressione aggiunti in `tests/test_api.py` (classe `TestAnalyzeStartFen` + `TestImportPgn::test_import_with_fen_header_is_analyzable`): analisi di un drill Bianco-al-tratto (`kr_vs_k`), di un drill Nero-al-tratto (`philidor`, copre anche Bug #9), di uno `start_fen` custom iniettato via `POST /game/new`, e di un import PGN con header `FEN`. Verificato che i nuovi test vanno effettivamente in hang/timeout sul codice pre-fix (git stash del solo `main.py`) e passano in ~3s su quello fixato — non solo "verde per caso". Vedi anche Bug #9 (stesso file, correlato, fixato nello stesso intervento).
 
 ---
 
@@ -168,8 +168,8 @@ Conferme puntuali:
 
 **File:** `backend/main.py` → `analyze_game()`, riga ~875
 **Priorità:** Bassa (bloccato/mascherato da Bug #8 — riemerge non appena quello viene fixato)
-**Stato:** Trovato il 13 luglio 2026, stessa revisione di Bug #8. **Non ancora fixato.**
+**Stato:** Trovato il 13 luglio 2026, stessa revisione di Bug #8. **Fixato il 17 luglio 2026** (branch `fix/analyze-start-fen`), insieme a Bug #8.
 
 **Problema:** `move_number = (ply_idx // 2) + 1` assume che il ply 1 sia sempre del Bianco. Per uno `start_fen` col Nero al tratto (es. drill Philidor), il ply 1 (Nero) e il ply 2 (Bianco) ricevono lo stesso `move_number`, con i colori invertiti rispetto alla realtà — la tabella a due colonne del pannello di analisi (Fase 3, `buildAnalysisMovesHtml()`) raggrupperebbe le semimosse nelle righe sbagliate.
 
-**Nota:** oggi non osservabile in pratica perché Bug #8 blocca del tutto l'analisi di queste partite prima che si arrivi al calcolo di `move_number`. Va corretto **insieme** a Bug #8 nello stesso intervento, altrimenti il fix di #8 lo fa riemergere subito. Pattern di fix noto e già usato altrove: derivare il colore/turno di partenza da `board.turn` della posizione iniziale, lo stesso approccio già adottato in `_create_new_game` dal fix collaterale di Fase 4 (vedi `docs/status.md`).
+**Fix applicato (17 luglio 2026):** derivato `initial_turn` da `board.turn` sulla posizione di partenza (stesso pattern già usato in `_create_new_game`), poi calcolato un `effective_ply` che applica un offset di un ply quando `initial_turn == "black"` — così il ply 1 (Nero) resta da solo nella riga 1 e il primo ply del Bianco apre la riga 2, invece di essere accoppiati sulla stessa riga con `move_number` errato. Coperto dallo stesso test del drill Philidor citato nel fix di Bug #8 (asserisce `move_number`/`color` per entrambi i ply) e dal test di import con header `FEN`.

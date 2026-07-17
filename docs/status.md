@@ -5,9 +5,9 @@ rileggere l'intera cronologia. Per il piano di fase completo (schema DB, endpoin
 vedi `CLAUDE.md` → sezione "Roadmap fasi" e la memoria di progetto
 `project_chess_lab_persistence_analytics`. Questo file è solo lo **snapshot dei branch in volo**.
 
-Ultimo aggiornamento: **13 luglio 2026** (sessione in pausa per crediti esauriti, ripresa prevista il giorno dopo).
+Ultimo aggiornamento: **17 luglio 2026**.
 
-**Nota di ripresa — PRIORITÀ:** durante una revisione generale del progetto (Fable, `docs/project-state-review.md`, già mergiata) è emerso un **bug reale e serio, non ancora fixato**: `POST /game/analyze` ignora `start_fen` e va in hang permanente (con leak di processi Stockfish) su qualsiasi drill di finali o import PGN con header `FEN`. Documentato come **Bug #8** in `docs/bugs.md` (+ Bug #9 correlato, `move_number` errato per partite col nero al tratto dalla posizione iniziale — va fixato insieme). Fix stimato ~2 righe + test di regressione (l'helper `_starting_board()` esiste già). **Questo è il primo task da fare alla ripresa**, prima di qualsiasi nuova feature.
+**Bug #8/#9 fixati (17 luglio 2026, branch `fix/analyze-start-fen`):** `POST /game/analyze` ora onora `start_fen` (`_starting_board()` sostituisce le due `chess.Board()` hardcodate) e `move_number` deriva correttamente il turno iniziale da `board.turn` invece di assumere sempre Bianco-first. 4 nuovi test di regressione in `tests/test_api.py` (`TestAnalyzeStartFen` + un test in `TestImportPgn`), 97/97 test verdi (93 preesistenti + 4 nuovi). Verificato che i nuovi test vanno in hang/timeout sul codice pre-fix e passano in ~3s su quello fixato. Vedi `docs/bugs.md` per i dettagli.
 
 ---
 
@@ -30,12 +30,11 @@ Ultimo aggiornamento: **13 luglio 2026** (sessione in pausa per crediti esauriti
 
 ## Prossimi passi, in ordine
 
-**L'iniziativa persistenza + storia + allenamento a 5 fasi è conclusa** (tutte le PR mergiate: #7, #8, #9, #10, #12, #13).
+**L'iniziativa persistenza + storia + allenamento a 5 fasi è conclusa** (tutte le PR mergiate: #7, #8, #9, #10, #12, #13). Bug #8/#9 fixati (vedi sopra), branch `fix/analyze-start-fen` pronto per PR.
 
-1. **Priorità: fixare Bug #8 + Bug #9** (`docs/bugs.md`) — `analyze_game()` in `backend/main.py` righe ~801/~815, sostituire `chess.Board()` con `_starting_board(game.get("start_fen"))`, più fix `move_number` riga ~875, più 2 test di regressione (drill + import con header FEN). Piccolo, ben scoped — buon candidato Sonnet.
-2. L'utente apre la PR per `docs/project-state-review` (solo documentazione).
-3. Verificare anche la nota del review sul FEN mancante nel drill `rook_pawn_win` (`GET /training/endgames`) — bug minore, non ancora in `docs/bugs.md`, da aggiungere se confermato.
-4. In coda (non lanciate): scacchiera ridimensionabile drag-to-resize (`docs/improvements.md`); implementazione dell'overlay "pezzi in presa" (design pronto in `docs/threatened-pieces-design.md`, in attesa di via libera dell'utente); investimento strutturale sul frontend (split file + harness di test).
+1. L'utente apre la PR per `fix/analyze-start-fen` (Bug #8/#9) e per `docs/project-state-review` (solo documentazione).
+2. Verificare anche la nota del review sul FEN mancante nel drill `rook_pawn_win` (`GET /training/endgames`) — bug minore, non ancora in `docs/bugs.md`, da aggiungere se confermato.
+3. In coda (non lanciate): scacchiera ridimensionabile drag-to-resize (`docs/improvements.md`); implementazione dell'overlay "pezzi in presa" (design pronto in `docs/threatened-pieces-design.md`, in attesa di via libera dell'utente); investimento strutturale sul frontend (split file + harness di test).
 
 ## Da non dimenticare
 
