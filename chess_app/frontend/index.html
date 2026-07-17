@@ -179,6 +179,11 @@ body {
 .square.selected { background: rgba(20, 85, 30, 0.5) !important; }
 .square.last-move { background: rgba(155, 199, 0, 0.45) !important; }
 .square.king-check { background: rgba(204, 51, 51, 0.55) !important; }
+/* Pezzo in presa (modalità assistita): glow inset sul CONTORNO della casella,
+   mai uno sfondo pieno — il rosso pieno è già "scacco al re" (.king-check) e
+   gli sfondi selected/last-move devono restare sommabili. Statico, un solo
+   tier; sta sotto lo strato frecce SVG (z-index 5). */
+.square.in-presa { box-shadow: inset 0 0 0 3px var(--red), inset 0 0 10px 2px rgba(204, 51, 51, 0.55); }
 
 .square.legal-move::after {
   content: '';
@@ -269,6 +274,29 @@ body {
 .hint-strength .strength-row button {
   padding: 5px 0;
   font-size: 12px;
+}
+
+/* Sotto-toggle "pezzi in presa" — visibile solo in modalità assistita,
+   indipendente dal toggle frecce/eval bar. */
+.threat-toggle {
+  display: none;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.threat-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.threat-toggle .threat-note {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 4px;
 }
 
 .hint-panel {
@@ -936,6 +964,14 @@ body {
         <div class="hint-strength-label">Forza suggerimenti</div>
         <div class="strength-row" id="hint-strength-row"></div>
       </div>
+      <div class="threat-toggle" id="threat-toggle"
+           title="Evidenzia in rosso i tuoi pezzi attaccati e non difesi quando tocca a te. Limite: solo pezzi indifesi attaccati &mdash; non cambi sfavorevoli n&eacute; tattiche.">
+        <label>
+          <input type="checkbox" id="threat-checkbox" checked onchange="toggleThreats(this.checked)">
+          Evidenzia pezzi in presa
+        </label>
+        <div class="threat-note">Solo pezzi indifesi attaccati &mdash; non cambi sfavorevoli n&eacute; tattiche</div>
+      </div>
       <div class="hint-panel" id="hint-panel"></div>
       <div class="move-list" id="move-list"></div>
     </div>
@@ -1151,6 +1187,8 @@ let state = {
   hint: null,             // ultima risposta di /game/{id}/hint
   hintLoading: false,
   hintElo: null,          // forza hint engine (ELO); null = piena forza (default)
+  showThreats: true,      // sotto-toggle "pezzi in presa": default ON in assistita
+  threats: [],            // caselle dei propri pezzi in presa (da GET /threats)
 };
 
 // Pezzi come veri asset SVG (set Cburnett di Lichess, frontend/pieces/*.svg),
@@ -1373,7 +1411,7 @@ function askPromotion(color) {
 // Renderer condiviso della board (partita live E replay): costruisce la griglia
 // 8x8 per una FEN qualsiasi. La partita live vi aggiunge selezione, mosse legali
 // e click-handler; il replay la usa in sola lettura con il proprio orientamento.
-function buildBoardEl({ fen, orientation, lastMove = null, selectedSq = null, legalMoves = [], isCheck = false, onSquare = null }) {
+function buildBoardEl({ fen, orientation, lastMove = null, selectedSq = null, legalMoves = [], isCheck = false, threatSquares = [], onSquare = null }) {
   const pieceMap = fenToMap(fen);
   const turnColor = fen.split(' ')[1] === 'w' ? 'white' : 'black';
   const kingSq = isCheck ? findKing(pieceMap, turnColor) : null;
@@ -1394,6 +1432,7 @@ function buildBoardEl({ fen, orientation, lastMove = null, selectedSq = null, le
     if (selectedSq === sq) div.classList.add('selected');
     if (lastMove && (lastMove.from === sq || lastMove.to === sq)) div.classList.add('last-move');
     if (kingSq === sq) div.classList.add('king-check');
+    if (threatSquares.includes(sq)) div.classList.add('in-presa');
 
     const lm = legalMoves.find(m => m.to === sq);
     if (lm) {
@@ -1437,6 +1476,7 @@ function renderBoard() {
     selectedSq: state.selectedSq,
     legalMoves: state.legalMoves,
     isCheck: state.isCheck,
+    threatSquares: (state.assisted && state.showThreats) ? state.threats : [],
     onSquare: onSquareClick,
   }));
 
@@ -1454,10 +1494,12 @@ function toggleAssisted() {
   document.getElementById('eval-bar').style.display = state.assisted ? 'block' : 'none';
   if (state.assisted) {
     fetchHint();
+    fetchThreats();
   } else {
     hintSeq++;
     state.hint = null;
     state.hintLoading = false;
+    clearThreats();
     renderHintUI();
   }
 }
@@ -1507,6 +1549,56 @@ function renderHintUI() {
   renderArrows();
   renderHintPanel();
   renderHintStrength();
+  renderThreatToggle();
+}
+
+// ---------- Pezzi in presa (sotto-toggle della modalità assistita) ----------
+// Diagnostica passiva, disaccoppiata dal /hint on-demand: GET /threats è puro
+// python-chess (nessuno Stockfish), quindi si può rifetchare ad OGNI cambio di
+// posizione. Solo i propri pezzi, solo al proprio turno (design doc §7).
+
+// Anti-race dedicato, stesso pattern di hintSeq
+let threatSeq = 0;
+
+function clearThreats() {
+  threatSeq++;             // discard any in-flight /threats response
+  if (state.threats.length) {
+    state.threats = [];
+    renderBoard();
+  }
+}
+
+async function fetchThreats() {
+  if (!state.assisted || !state.showThreats || !state.gameId
+      || state.isGameOver || state.turn !== state.playerColor) {
+    clearThreats();
+    return;
+  }
+  const seq = ++threatSeq;
+  try {
+    const data = await fetchJson(`/game/${state.gameId}/threats`);
+    if (seq !== threatSeq) return;   // stale response, position changed meanwhile
+    // Il backend valuta il lato al tratto: evidenzia solo se coincide col
+    // player — mai i pezzi avversari, mai fuori dal proprio turno.
+    state.threats = data.side === state.playerColor
+      ? data.in_presa.map(t => t.square)
+      : [];
+  } catch (e) {
+    if (seq !== threatSeq) return;
+    state.threats = [];
+  }
+  renderBoard();
+}
+
+function toggleThreats(checked) {
+  state.showThreats = checked;
+  if (checked) fetchThreats();
+  else clearThreats();
+}
+
+function renderThreatToggle() {
+  document.getElementById('threat-toggle').style.display = state.assisted ? 'block' : 'none';
+  document.getElementById('threat-checkbox').checked = state.showThreats;
 }
 
 // ---------- Forza dell'hint engine ----------
@@ -1774,8 +1866,9 @@ function updateState(data) {
     state.lastMove = { from: lastUci.slice(0, 2), to: lastUci.slice(2, 4) };
   }
 
-  // Position changed: previous hint arrows no longer apply
+  // Position changed: previous hint arrows and threat glows no longer apply
   state.hint = null;
+  state.threats = [];
 
   renderBoard();
   renderMoveList();
@@ -1791,6 +1884,9 @@ function updateState(data) {
 
   if (state.assisted) fetchHint();
   else renderHintUI();
+  // Refresh dei pezzi in presa ad ogni cambio di posizione, indipendente dal
+  // /hint on-demand (le guardie interne lo rendono un no-op fuori condizione)
+  fetchThreats();
 }
 
 // ---------- Export PGN ----------
@@ -1954,6 +2050,8 @@ function resetPlayUi() {
   hintSeq++;               // invalidate any in-flight hint from the previous game
   state.hint = null;
   state.hintLoading = false;
+  threatSeq++;             // idem for any in-flight /threats response
+  state.threats = [];
 }
 
 async function startGame() {

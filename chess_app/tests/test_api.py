@@ -291,6 +291,106 @@ class TestHint:
 
 
 # -------------------------------------------------------------------
+# /game/{id}/threats — pezzi in presa (attaccati E indifesi), v1
+# -------------------------------------------------------------------
+class TestThreats:
+    def _inject(self, game_id: str, fen: str, player_color: str = "white"):
+        """Partita iniettata in sola cache con posizione deterministica
+        (stesso pattern di test_analyze_mate_swing_clamped)."""
+        games[game_id] = {
+            "board": chess.Board(fen),
+            "player_color": player_color,
+            "engine_elo": 800,
+            "move_objects": [],
+            "last_engine_move": None,
+            "created_at": "2026.07.17",
+        }
+
+    def test_hanging_piece_detected(self, client):
+        # Cavallo bianco in d4 attaccato dal pedone e5 e non difeso da nessuno.
+        self._inject("thr_hang", "k7/8/8/4p3/3N4/8/8/K7 w - - 0 1")
+        r = client.get("/game/thr_hang/threats")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["side"] == "white"
+        assert data["in_presa"] == [
+            {"square": "d4", "piece": "N", "value": 3, "attackers": ["e5"]}
+        ]
+
+    def test_defended_piece_not_flagged(self, client):
+        # Stessa posizione ma col pedone c3 che difende il cavallo d4:
+        # attaccato MA difeso -> non in presa (definizione v1, niente SEE).
+        self._inject("thr_def", "k7/8/8/4p3/3N4/2P5/8/K7 w - - 0 1")
+        r = client.get("/game/thr_def/threats")
+        assert r.status_code == 200
+        assert r.json()["in_presa"] == []
+
+    def test_own_color_only(self, client):
+        # Cavallo NERO in d4 attaccato dal pedone bianco c3, indifeso — ma al
+        # tratto c'è il bianco: si valutano solo i pezzi del lato al tratto.
+        self._inject("thr_own", "k7/8/8/8/3n4/2P5/8/K7 w - - 0 1")
+        r = client.get("/game/thr_own/threats")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["side"] == "white"
+        assert data["in_presa"] == []
+
+    def test_king_never_listed(self, client):
+        # Re bianco h1 attaccato dalla torre a1 (scacco, non matto: Kh2 legale).
+        # Il re non entra mai in in_presa: lo scacco è dominio di .king-check.
+        self._inject("thr_king", "k7/8/8/8/8/8/8/r6K w - - 0 1")
+        r = client.get("/game/thr_king/threats")
+        assert r.status_code == 200
+        assert r.json()["in_presa"] == []
+
+    def test_multiple_attackers_sorted(self, client):
+        # Torre bianca d5 attaccata da due pedoni neri (c6 ed e6), indifesa:
+        # entrambe le caselle attaccanti riportate, ordinate.
+        self._inject("thr_multi", "k7/8/2p1p3/3R4/8/8/8/K7 w - - 0 1")
+        r = client.get("/game/thr_multi/threats")
+        assert r.status_code == 200
+        entries = r.json()["in_presa"]
+        assert len(entries) == 1
+        assert entries[0]["square"] == "d5"
+        assert entries[0]["value"] == 5
+        assert entries[0]["attackers"] == ["c6", "e6"]
+
+    def test_black_to_move_side(self, client):
+        # Al tratto c'è il nero: side="black" e pezzi neri (lettera FEN
+        # minuscola). Cavallo nero d4 attaccato dal pedone bianco c3, indifeso.
+        self._inject("thr_black", "k7/8/8/8/3n4/2P5/8/K7 b - - 0 1", player_color="black")
+        r = client.get("/game/thr_black/threats")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["side"] == "black"
+        assert data["in_presa"] == [
+            {"square": "d4", "piece": "n", "value": 3, "attackers": ["c3"]}
+        ]
+
+    def test_threats_game_over(self, client, white_game):
+        gid = white_game["game_id"]
+        # Matto del barbiere: partita finita -> 400, stessa convenzione di /hint
+        games[gid]["board"] = chess.Board(
+            "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3"
+        )
+        r = client.get(f"/game/{gid}/threats")
+        assert r.status_code == 400
+
+    def test_threats_game_not_found(self, client):
+        r = client.get("/game/nonexist/threats")
+        assert r.status_code == 404
+
+    def test_threats_do_not_alter_state(self, client, white_game):
+        gid = white_game["game_id"]
+        before = client.get(f"/game/{gid}").json()
+        r = client.get(f"/game/{gid}/threats")
+        assert r.status_code == 200
+        after = client.get(f"/game/{gid}").json()
+        assert after["fen"] == before["fen"]
+        assert after["move_history"] == before["move_history"]
+
+
+# -------------------------------------------------------------------
 # /health
 # -------------------------------------------------------------------
 class TestHealth:

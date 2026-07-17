@@ -795,6 +795,58 @@ def game_hint(game_id: str, req: HintRequest):
         "lines": lines,
     }
 
+# Valori convenzionali dei pezzi per l'endpoint /threats (P1 N/B3 R5 Q9, per
+# ordinare/enfatizzare). Distinti da _PIECE_VALUES (soglia materiale di fase,
+# dove pedoni e re valgono 0 per definizione).
+_PRESA_PIECE_VALUES = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+}
+
+@app.get("/game/{game_id}/threats")
+def game_threats(game_id: str):
+    """Pezzi "in presa" del lato al tratto: attaccati da almeno un pezzo
+    avversario E non difesi da nessun proprio pezzo (definizione v1, livello 2
+    di docs/threatened-pieces-design.md). Funzione pura della posizione
+    corrente calcolata con python-chess — MAI Stockfish: il valore della
+    feature è essere sempre-aggiornabile a costo quasi zero, disaccoppiata
+    dal /hint on-demand. Non muta stato, non tocca il DB."""
+    game = _get_game(game_id)
+    board = game["board"]
+
+    if board.is_game_over():
+        raise HTTPException(status_code=400, detail="Game is already over")
+
+    me = board.turn
+    opponent = not me
+    in_presa = []
+    for sq, piece in board.piece_map().items():
+        # Il re non entra mai: se attaccato è scacco, già coperto da .king-check
+        if piece.color != me or piece.piece_type == chess.KING:
+            continue
+        attackers = board.attackers(opponent, sq)
+        if not attackers:
+            continue
+        if board.attackers(me, sq):
+            continue  # defended (even once): not hanging in the v1 definition
+        in_presa.append({
+            "square": chess.square_name(sq),
+            "piece": piece.symbol(),
+            "value": _PRESA_PIECE_VALUES[piece.piece_type],
+            "attackers": sorted(chess.square_name(a) for a in attackers),
+        })
+
+    # Pezzi di maggior valore per primi (ordinamento deterministico)
+    in_presa.sort(key=lambda entry: (-entry["value"], entry["square"]))
+
+    return {
+        "side": "white" if me == chess.WHITE else "black",
+        "in_presa": in_presa,
+    }
+
 @app.post("/game/analyze")
 def analyze_game(req: AnalyzeRequest):
     game = _get_game(req.game_id)

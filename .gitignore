@@ -36,6 +36,10 @@ Thumbs.db
 *.db-wal
 *.db-shm
 
+# Dipendenze locali dell'harness jsdom (SOLO tooling di test, non dell'app:
+# il frontend resta a zero dipendenze npm)
+chess_app/tests/.harness_deps/
+
 # Claude Code local state (personal, not project source)
 .claude/settings.local.json
 .claude/projects/
