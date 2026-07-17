@@ -7,7 +7,9 @@ vedi `CLAUDE.md` → sezione "Roadmap fasi" e la memoria di progetto
 
 Ultimo aggiornamento: **17 luglio 2026**.
 
-**Bug #8/#9 fixati (17 luglio 2026, branch `fix/analyze-start-fen`):** `POST /game/analyze` ora onora `start_fen` (`_starting_board()` sostituisce le due `chess.Board()` hardcodate) e `move_number` deriva correttamente il turno iniziale da `board.turn` invece di assumere sempre Bianco-first. 4 nuovi test di regressione in `tests/test_api.py` (`TestAnalyzeStartFen` + un test in `TestImportPgn`), 97/97 test verdi (93 preesistenti + 4 nuovi). Verificato che i nuovi test vanno in hang/timeout sul codice pre-fix e passano in ~3s su quello fixato. Vedi `docs/bugs.md` per i dettagli.
+**Bug #8/#9 fixati e mergiati (17 luglio 2026, PR #14, branch `fix/analyze-start-fen`):** `POST /game/analyze` ora onora `start_fen` (`_starting_board()` sostituisce le due `chess.Board()` hardcodate) e `move_number` deriva correttamente il turno iniziale da `board.turn` invece di assumere sempre Bianco-first. 4 nuovi test di regressione in `tests/test_api.py` (`TestAnalyzeStartFen` + un test in `TestImportPgn`), 97/97 test verdi (93 preesistenti + 4 nuovi). Verificato che i nuovi test vanno in hang/timeout sul codice pre-fix e passano in ~3s su quello fixato. Vedi `docs/bugs.md` per i dettagli.
+
+**Pezzi in presa v1 implementato e mergiato (17 luglio 2026, PR #15, branch `feature/threatened-pieces`):** nuovo `GET /game/{id}/threats` (puro `python-chess`, nessuno Stockfish) + sotto-toggle "Evidenzia pezzi in presa" in Assisted Mode (glow rosso inset, refresh disaccoppiato da `/hint`). Design in `docs/threatened-pieces-design.md` §8. 102/102 test backend + 41/41 check jsdom. L'harness jsdom, finora riusato a mano e mai committato, è stato salvato in `chess_app/tests/frontend_harness.mjs` + `run_frontend_harness.sh` — chiude uno dei gap segnalati in `docs/project-state-review.md`.
 
 ---
 
@@ -26,15 +28,18 @@ Ultimo aggiornamento: **17 luglio 2026**.
 | `feature/training-ui` | ✅ **Merged in `main`** (PR #12) | Fase 5 frontend (ultima fase) completa: pannello Allenamento — puzzle solver SRS, dashboard debolezze, selezione drill finali. 93/93 test verdi, verificato live via jsdom su backend isolato (porta 8766, DB scratch, senza toccare il dev server dell'utente). |
 | `docs/en-passant-bug-analysis` | ✅ **Merged in `main`** (PR #11) | Documento di analisi tecnica standalone per Bug #7 (`docs/en-passant-bug7-deepdive.md`) — non è un bug, verifica indipendente con python-chess, nessuna modifica al codice. Fuori dall'iniziativa a 5 fasi. |
 | `docs/threatened-pieces-design` | ✅ **Merged in `main`** (PR #13) | Valutazione design completa (`docs/threatened-pieces-design.md`, nessuna implementazione): definizione = pezzo attaccato e indifeso (hanging), nuovo endpoint leggero `GET /game/{id}/threats` senza Stockfish, glow inset rosso di contorno. SEE e minacce prospettiche flaggate come v2. |
-| `docs/project-state-review` | ✅ Pushed, **pronto per PR** | Valutazione generale dello stato del progetto post-Fase 5 (`docs/project-state-review.md`): punti di forza (write-through cache, `buildBoardEl()` condiviso), debito tecnico (due "epoche" di stile nel frontend, `fetchJson()` vs raw-fetch divergenti), **3 bug non tracciati trovati e ora documentati come Bug #8/#9/(FEN mancante nel drill `rook_pawn_win`)**, gap di test coverage (nessun test incrocia `start_fen`×analyze, SRS review-queue, promozione). Miglioramento rapido consigliato: fix Bug #8+#9 (~1 ora). Investimento strutturale consigliato: split di `index.html` in file `<script src>` separati + commit dell'harness jsdom riusato 3 volte e mai salvato. |
+| `fix/analyze-start-fen` | ✅ **Merged in `main`** (PR #14) | Bug #8/#9 fixati (vedi nota sopra). |
+| `feature/threatened-pieces` | ✅ **Merged in `main`** (PR #15) | Pezzi in presa v1 implementato (vedi nota sopra). Via libera utente dato il 17 luglio 2026, dispatch a un subagent modello Fable. |
+| `docs/project-state-review` | ✅ Pushed, **pronto per PR** | Valutazione generale dello stato del progetto post-Fase 5 (`docs/project-state-review.md`): punti di forza (write-through cache, `buildBoardEl()` condiviso), debito tecnico (due "epoche" di stile nel frontend, `fetchJson()` vs raw-fetch divergenti), **3 bug non tracciati trovati e ora documentati come Bug #8/#9/(FEN mancante nel drill `rook_pawn_win`)**, gap di test coverage (nessun test incrocia `start_fen`×analyze, SRS review-queue, promozione). Fix Bug #8+#9 e implementazione pezzi in presa ora completati (vedi righe sopra). Investimento strutturale rimasto: split di `index.html` in file `<script src>` separati (l'harness jsdom è stato salvato nel frattempo, vedi nota pezzi in presa sopra). |
 
 ## Prossimi passi, in ordine
 
-**L'iniziativa persistenza + storia + allenamento a 5 fasi è conclusa** (tutte le PR mergiate: #7, #8, #9, #10, #12, #13). Bug #8/#9 fixati (vedi sopra), branch `fix/analyze-start-fen` pronto per PR.
+**L'iniziativa persistenza + storia + allenamento a 5 fasi è conclusa** (tutte le PR mergiate: #7, #8, #9, #10, #12, #13). Bug #8/#9 e pezzi in presa v1 fixati/implementati e mergiati (PR #14, #15).
 
-1. L'utente apre la PR per `fix/analyze-start-fen` (Bug #8/#9) e per `docs/project-state-review` (solo documentazione).
+1. L'utente apre la PR per `docs/project-state-review` (solo documentazione).
 2. Verificare anche la nota del review sul FEN mancante nel drill `rook_pawn_win` (`GET /training/endgames`) — bug minore, non ancora in `docs/bugs.md`, da aggiungere se confermato.
-3. In coda (non lanciate): scacchiera ridimensionabile drag-to-resize (`docs/improvements.md`); implementazione dell'overlay "pezzi in presa" (design pronto in `docs/threatened-pieces-design.md`, in attesa di via libera dell'utente); investimento strutturale sul frontend (split file + harness di test).
+3. In coda (non lanciate): scacchiera ridimensionabile drag-to-resize (`docs/improvements.md`); rifiniture pezzi in presa v2 (SEE, minacce prospettiche — `docs/threatened-pieces-design.md` §5); investimento strutturale sul frontend (split file `index.html`).
+4. Fase 5 rimanente: identificazione apertura ECO, statistiche personali + dashboard riepilogo (`CLAUDE.md` → Roadmap fasi). Coach Mode (Fase 7) resta bloccato finché non c'è una `ANTHROPIC_API_KEY` configurata.
 
 ## Da non dimenticare
 
