@@ -242,9 +242,11 @@ Obiettivo: trasformare l'app in un vero trainer con feedback quantitativo sui pr
 | Settimana | Attività | Ore stimate | Modello suggerito |
 |-----------|----------|-------------|-------------------|
 | Sett. 9 giu | ✅ Grafico eval: curva centipawn, highlight blunders, click → jump mossa — **anticipato, completato l'11 luglio 2026** su `feature/analysis-panel-v2` insieme al restyling a due colonne del pannello analisi (vedi [docs/improvements.md](docs/improvements.md)) | ~3 ore | Opus |
-| Sett. 16 giu | Identificazione apertura ECO live (eco.json locale, ~500 aperture) | ~2.5 ore | Sonnet |
+| Sett. 16 giu | ✅ Identificazione apertura ECO live (eco.json locale) — **completato 18 luglio 2026** su `feature/eco-openings` | ~2.5 ore | Sonnet |
 | Sett. 23 giu | Statistiche personali: accuracy storica, errori frequenti, ELO simulato | ~3 ore | Opus |
 | Sett. 23 giu | Dashboard riepilogo (ultimi 10 match, trend accuracy) | ~1.5 ore | Sonnet |
+
+**Nota (aperture ECO, 18 luglio 2026):** dataset curato in `backend/data/eco.json` (822 righe: eco, name, uci, san), 822/822 validate programmaticamente contro `python-chess` (ogni SAN si riparsa nell'UCI atteso, nessun duplicato di chiave) — copertura più ampia della stima iniziale "~500" di roadmap. `backend/eco_book.py` espone `match_opening(move_history_uci)`: longest-prefix match puro in memoria (book caricato una volta all'import, nessuna dipendenza dal DB). Wired come campo `"opening"` (`{"eco", "name"} | null`) in `_board_to_state` — quindi su `POST /game/new`, `POST /game/move`, `GET /game/{id}`, `POST /games/import`, `POST /training/endgames/{id}/start` — e su `GET /game/{id}/replay`. Una `start_fen` custom (drill di finali) non viene mai matchata: il book è costruito sulla posizione standard, matchare una posizione arbitraria non avrebbe senso, quindi `_current_opening()` ritorna `null` a prescindere dalle mosse se `game["start_fen"]` è valorizzato. Frontend: badge ECO+nome (`#opening-display`) sopra la move-list nella vista Gioca, aggiornato ad ogni `updateState()`, nascosto quando fuori libro. 9 nuovi test pytest (`TestOpening` in `tests/test_api.py`: match a mossa singola, aggiornamento ply-per-ply, righe note — Ruy Lopez/Italiana/Siciliana —, sequenza fuori libro → null, fallback al prefisso più lungo dopo la divergenza, nessun match con `start_fen` custom) — 115/115 nella suite. Verifica frontend via lo stesso harness jsdom delle fasi precedenti (`tests/frontend_harness.mjs`), estesa con controlli sul wiring end-to-end e sul rendering del badge — 45/45 check.
 
 ---
 
@@ -318,8 +320,8 @@ Maggio 2026
 Giugno 2026
 ├── Sett. 2 giu   ████  Fase 4 — frontend pannello Allenamento  ✅ completato
 ├── Sett. 9 giu   ████  Fase 5 — eval chart  ✅ completato (anticipato)
-├── Sett. 16 giu  ████  Fase 5 — aperture ECO  ← prossimo
-└── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard
+├── Sett. 16 giu  ████  Fase 5 — aperture ECO  ✅ completato
+└── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard  ← prossimo
 
 Luglio 2026
 ├── Sett. 30 giu  ████  Fase 6 — puzzle trainer (dataset esterno)
@@ -393,9 +395,15 @@ loss <  -10  → excellent
   "last_engine_move": "e7e5" | null,
   "move_history": ["e2e4", "e7e5", ...],
   "player_color": "white"|"black",
-  "engine_elo": 1000
+  "engine_elo": 1000,
+  "opening": {"eco": "C60", "name": "Ruy Lopez"} | null
 }
 ```
+`opening` (Fase 5, `backend/eco_book.py`): longest-prefix match della cronologia mosse
+contro `backend/data/eco.json` (822 righe curate). `null` se la posizione è già fuori
+libro o se la partita parte da uno `start_fen` custom (drill di finali — il book è
+costruito sulla posizione standard, non ha senso matchare un FEN arbitrario). Presente
+anche su `GET /game/{id}/replay`.
 
 **Risposta tipo `/game/analyze`:**
 ```json

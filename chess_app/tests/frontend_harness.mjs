@@ -61,6 +61,19 @@ check('sendMove aggiorna history (player+engine)', ev('state.moveHistory.length'
 check('move list mostra SAN', $('move-list').textContent.includes('e4'));
 check('assisted off: toggle pezzi in presa nascosto', $('threat-toggle').style.display !== 'block');
 
+// ---- Apertura ECO: wiring end-to-end (la correttezza del dataset/matching è
+// già coperta da pytest — qui si verifica solo che il backend esponga il
+// campo e che il frontend lo mostri/nasconda correttamente) ----
+const stateResp = await (await fetch(`${API}/game/${ev('state.gameId')}`)).json();
+check('opening: campo presente nella risposta reale del backend', 'opening' in stateResp, JSON.stringify(stateResp.opening));
+ev("state.opening = { eco: 'B20', name: 'Sicilian Defense' }; renderOpening();");
+check('opening: display mostra eco e nome',
+  $('opening-display').textContent.includes('B20') && $('opening-display').textContent.includes('Sicilian Defense'));
+check('opening: display visibile quando valorizzato', $('opening-display').classList.contains('visible'));
+ev('state.opening = null; renderOpening();');
+check('opening: display nascosto quando null',
+  !$('opening-display').classList.contains('visible') && $('opening-display').textContent === '');
+
 // ---- Assisted mode: hint + eval bar + frecce + sotto-toggle in presa ----
 ev('toggleAssisted()');
 const gotHint = await waitFor(() => ev('state.hint !== null'), 60000);
