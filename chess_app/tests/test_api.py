@@ -1,5 +1,6 @@
 """Test end-to-end per Chess Lab API."""
 
+import time
 from datetime import datetime, timedelta
 
 import chess
@@ -1772,6 +1773,242 @@ class TestAnalyzeStartFen:
         assert ply1["color"] == "white"
         assert ply1["move_number"] == 1
         assert ply1["move_uci"] == "e2e4"
+
+
+
+# -------------------------------------------------------------------
+# Time control (Fase 6) — clock digitale + incremento Fischer. time_control
+# opzionale su /game/new: None (default, vedi white_game/black_game) = partita
+# non a tempo, comportamento storico invariato — coperto esplicitamente sotto
+# come test di regressione, non solo per assunzione.
+# -------------------------------------------------------------------
+class TestTimeControl:
+    def _new_timed_game(self, client, player_color="white", initial=60, increment=5, engine_elo=800):
+        r = client.post("/game/new", json={
+            "player_color": player_color,
+            "engine_elo": engine_elo,
+            "time_control": {"initial_seconds": initial, "increment_seconds": increment},
+        })
+        assert r.status_code == 200
+        return r.json()
+
+    # --- regressione: untimed è un no-op completo -------------------------
+
+    def test_untimed_game_has_null_time_control_and_clock(self, client, white_game):
+        assert white_game["time_control"] is None
+        # clock resta presente ma a valori None (mai top-level None) — vedi
+        # CLAUDE.md, nota di design Fase 6.
+        assert white_game["clock"] == {"white": None, "black": None}
+
+    def test_untimed_game_omits_clock_columns_in_db(self, client, white_game):
+        with SessionLocal() as db:
+            row = db.get(Game, white_game["game_id"])
+            assert row.initial_seconds is None
+            assert row.increment_seconds is None
+            assert row.white_clock_ms is None
+            assert row.black_clock_ms is None
+
+    def test_untimed_game_move_flow_unaffected(self, client, white_game):
+        """Stesso identico comportamento di /game/move pre-feature per una
+        partita non a tempo: nessun game_over spurio, clock sempre None."""
+        gid = white_game["game_id"]
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+        state = r.json()
+        assert state["clock"] == {"white": None, "black": None}
+        assert state["time_control"] is None
+        assert state["is_game_over"] is False
+        assert "game_over" not in state
+
+    def test_untimed_black_opening_unaffected(self, client, black_game):
+        assert black_game["clock"] == {"white": None, "black": None}
+        assert black_game["time_control"] is None
+
+    # --- creazione partita a tempo -----------------------------------------
+
+    def test_new_timed_game_initializes_clock(self, client):
+        data = self._new_timed_game(client, initial=60, increment=5)
+        assert data["time_control"] == {"initial_seconds": 60, "increment_seconds": 5}
+        assert data["clock"] == {"white": 60000, "black": 60000}
+
+    def test_new_timed_game_persists_columns(self, client):
+        data = self._new_timed_game(client, initial=60, increment=5)
+        with SessionLocal() as db:
+            row = db.get(Game, data["game_id"])
+            assert row.initial_seconds == 60
+            assert row.increment_seconds == 5
+            assert row.white_clock_ms == 60000
+            assert row.black_clock_ms == 60000
+
+    def test_time_control_below_minimum_rejected(self, client):
+        r = client.post("/game/new", json={
+            "player_color": "white", "engine_elo": 800,
+            "time_control": {"initial_seconds": 5, "increment_seconds": 0},
+        })
+        assert r.status_code == 422
+
+    def test_negative_increment_rejected(self, client):
+        r = client.post("/game/new", json={
+            "player_color": "white", "engine_elo": 800,
+            "time_control": {"initial_seconds": 60, "increment_seconds": -1},
+        })
+        assert r.status_code == 422
+
+    def test_engine_opening_move_debits_white_clock_when_player_is_black(self, client):
+        """Player nero → l'engine apre col bianco: il SUO clock (bianco) viene
+        debitato dell'elapsed reale di ricerca, poi incrementato — il clock del
+        nero (player, non ancora mosso) resta al valore iniziale esatto."""
+        data = self._new_timed_game(client, player_color="black", initial=60, increment=5)
+        assert data["clock"]["black"] == 60000
+        # elapsed reale (skill basso, pressoché istantaneo) + incremento: resta
+        # in un intorno ampio del valore iniziale, mai oltre initial+increment.
+        assert 0 < data["clock"]["white"] <= 60000 + 5000
+
+    # --- decremento + incremento --------------------------------------------
+
+    def test_clock_decrements_by_real_elapsed_and_increment_applied(self, client):
+        data = self._new_timed_game(client, initial=60, increment=5)
+        gid = data["game_id"]
+        # Simula 2s di riflessione reale spostando indietro il marker di
+        # riferimento (stesso meccanismo last_ready_at di Fase 3), invece di
+        # sleeppare davvero nel test.
+        games[gid]["last_ready_at"] = time.monotonic() - 2.0
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+        state = r.json()
+        # 60000 - ~2000 (debito) + 5000 (incremento) ≈ 63000
+        assert 62000 <= state["clock"]["white"] <= 64000
+        assert state["is_game_over"] is False
+        with SessionLocal() as db:
+            row = db.get(Game, gid)
+            assert row.white_clock_ms == state["clock"]["white"]
+
+    def test_black_clock_decremented_by_engine_search_and_incremented(self, client):
+        data = self._new_timed_game(client, initial=60, increment=5)
+        gid = data["game_id"]
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        state = r.json()
+        # L'engine (skill basso) risponde quasi istantaneamente: il clock nero
+        # resta vicino al valore iniziale + incremento, mai sopra quel tetto.
+        assert 0 < state["clock"]["black"] <= 60000 + 5000
+
+    def test_untimed_moves_do_not_credit_free_increment_after_cache_miss(self, client):
+        """Regressione sull'asimmetria corretta in _create_new_game/make_move:
+        se il think time del player è ignoto (post cache-miss, last_ready_at
+        assente) il clock non va né debitato né incrementato — mai un
+        incremento "gratis" senza debito corrispondente."""
+        data = self._new_timed_game(client, initial=60, increment=5)
+        gid = data["game_id"]
+        games.clear()  # simula un restart: last_ready_at si perde
+        client.get(f"/game/{gid}")  # ripopola la cache dal DB
+        assert gid in games
+        assert games[gid].get("last_ready_at") is None
+        clock_before = games[gid]["clock"]["white"]
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+        state = r.json()
+        assert state["clock"]["white"] == clock_before
+
+    # --- bandierina / timeout -------------------------------------------------
+
+    def test_flag_on_player_move_ends_game_without_applying_move(self, client):
+        data = self._new_timed_game(client, initial=15, increment=0)
+        gid = data["game_id"]
+        games[gid]["clock"]["white"] = 0
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+        state = r.json()
+        assert state["is_game_over"] is True
+        assert state["result"] == "0-1"
+        assert state["game_over"] == {"result": "0-1", "reason": "timeout"}
+        # La mossa che ha fatto scattare la bandierina non viene mai applicata.
+        assert state["move_history"] == []
+        with SessionLocal() as db:
+            row = db.get(Game, gid)
+            assert row.result == "0-1"
+            assert row.result_reason == "timeout"
+            assert row.finished_at is not None
+
+    def test_flag_on_engine_reply_ends_game_after_player_move_applied(self, client):
+        data = self._new_timed_game(client, initial=15, increment=0)
+        gid = data["game_id"]
+        games[gid]["clock"]["black"] = 0
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+        state = r.json()
+        assert state["is_game_over"] is True
+        assert state["result"] == "1-0"
+        assert state["game_over"]["reason"] == "timeout"
+        # Il flag scatta DURANTE la ricerca engine: la mossa del player, che è
+        # avvenuta prima, resta applicata.
+        assert state["move_history"] == ["e2e4"]
+
+    def test_moves_rejected_after_flag(self, client):
+        data = self._new_timed_game(client, initial=15, increment=0)
+        gid = data["game_id"]
+        games[gid]["clock"]["white"] = 0
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "d2d4"})
+        assert r.status_code == 400
+
+    def test_hint_rejected_after_flag(self, client):
+        data = self._new_timed_game(client, initial=15, increment=0)
+        gid = data["game_id"]
+        games[gid]["clock"]["white"] = 0
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        r = client.post(f"/game/{gid}/hint", json={"depth": 8})
+        assert r.status_code == 400
+
+    # --- persistenza / cache-miss -----------------------------------------
+
+    def test_clock_survives_cache_miss(self, client):
+        data = self._new_timed_game(client, initial=60, increment=5)
+        gid = data["game_id"]
+        games[gid]["last_ready_at"] = time.monotonic() - 1.0
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        before = client.get(f"/game/{gid}").json()
+
+        games.clear()
+        assert gid not in games
+
+        after = client.get(f"/game/{gid}").json()
+        assert gid in games
+        assert after["clock"] == before["clock"]
+        assert after["time_control"] == before["time_control"]
+
+    def test_flagged_result_survives_cache_miss(self, client):
+        """Il timeout non è deducibile dalla board ricostruita (la mossa che
+        ha fatto scattare la bandierina non viene mai applicata) — deve
+        sopravvivere via result_override dal risultato persistito, non solo
+        da _check_game_over(board)."""
+        data = self._new_timed_game(client, initial=15, increment=0)
+        gid = data["game_id"]
+        games[gid]["clock"]["white"] = 0
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+
+        games.clear()
+        after = client.get(f"/game/{gid}").json()
+        assert after["is_game_over"] is True
+        assert after["result"] == "0-1"
+        assert after["move_history"] == []
+
+        # Anche una mossa post-cache-miss su una partita già flaggata resta bloccata.
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 400
+
+    def test_endgame_drill_has_no_time_control(self, client):
+        """I drill di finali non espongono time_control — restano sempre non
+        a tempo, come import."""
+        r = client.get("/training/endgames")
+        drill_id = r.json()["endgames"][0]["id"]
+        r = client.post(
+            f"/training/endgames/{drill_id}/start",
+            json={"player_color": "white", "engine_elo": 800},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["clock"] == {"white": None, "black": None}
+        assert data["time_control"] is None
 
 
 class TestWebSocketLive:
