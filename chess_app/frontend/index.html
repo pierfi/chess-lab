@@ -355,6 +355,24 @@ body {
 
 @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
+.opening-display {
+  display: none;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 4px 2px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+.opening-display.visible { display: flex; }
+.opening-display .opening-eco {
+  font-family: monospace;
+  font-weight: bold;
+  color: var(--accent);
+}
+.opening-display .opening-name { color: var(--text); }
+
 .move-list {
   max-height: 300px;
   min-height: 60px;
@@ -973,6 +991,7 @@ body {
         <div class="threat-note">Solo pezzi indifesi attaccati &mdash; non cambi sfavorevoli n&eacute; tattiche</div>
       </div>
       <div class="hint-panel" id="hint-panel"></div>
+      <div class="opening-display" id="opening-display"></div>
       <div class="move-list" id="move-list"></div>
     </div>
 
@@ -1189,6 +1208,7 @@ let state = {
   hintElo: null,          // forza hint engine (ELO); null = piena forza (default)
   showThreats: true,      // sotto-toggle "pezzi in presa": default ON in assistita
   threats: [],            // caselle dei propri pezzi in presa (da GET /threats)
+  opening: null,           // {eco, name} dal backend (longest-prefix match), null se fuori libro
 };
 
 // Pezzi come veri asset SVG (set Cburnett di Lichess, frontend/pieces/*.svg),
@@ -1859,7 +1879,9 @@ function updateState(data) {
   state.moveHistory = data.move_history;
   state.moveHistorySan = data.move_history_san || [];
   state.pgn = data.pgn || null;
+  state.opening = data.opening || null;
   updateExportButton();
+  renderOpening();
 
   if (data.move_history.length >= 1) {
     const lastUci = data.move_history[data.move_history.length - 1];
@@ -1907,6 +1929,17 @@ function downloadPgn() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+function renderOpening() {
+  const el = document.getElementById('opening-display');
+  if (!state.opening) {
+    el.classList.remove('visible');
+    el.innerHTML = '';
+    return;
+  }
+  el.classList.add('visible');
+  el.innerHTML = `<span class="opening-eco">${state.opening.eco}</span><span class="opening-name">${state.opening.name}</span>`;
 }
 
 function renderMoveList() {
@@ -2052,6 +2085,8 @@ function resetPlayUi() {
   state.hintLoading = false;
   threatSeq++;             // idem for any in-flight /threats response
   state.threats = [];
+  state.opening = null;
+  renderOpening();
 }
 
 async function startGame() {
