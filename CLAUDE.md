@@ -243,8 +243,15 @@ Obiettivo: trasformare l'app in un vero trainer con feedback quantitativo sui pr
 |-----------|----------|-------------|-------------------|
 | Sett. 9 giu | ✅ Grafico eval: curva centipawn, highlight blunders, click → jump mossa — **anticipato, completato l'11 luglio 2026** su `feature/analysis-panel-v2` insieme al restyling a due colonne del pannello analisi (vedi [docs/improvements.md](docs/improvements.md)) | ~3 ore | Opus |
 | Sett. 16 giu | Identificazione apertura ECO live (eco.json locale, ~500 aperture) | ~2.5 ore | Sonnet |
-| Sett. 23 giu | Statistiche personali: accuracy storica, errori frequenti, ELO simulato | ~3 ore | Opus |
-| Sett. 23 giu | Dashboard riepilogo (ultimi 10 match, trend accuracy) | ~1.5 ore | Sonnet |
+| Sett. 23 giu | ✅ Statistiche personali: accuracy storica, errori frequenti, ELO simulato — **già interamente coperto dall'anticipo analytics di Fase 3** (audit 18 luglio 2026, vedi nota sotto — nessun codice nuovo servito) | ~3 ore | Opus |
+| Sett. 23 giu | ✅ Dashboard riepilogo (ultimi 10 match, trend accuracy) — **già interamente coperto** dalla tab Crescita di Fase 3 (audit 18 luglio 2026, vedi nota sotto) | ~1.5 ore | Sonnet |
+
+**Nota (statistiche & dashboard — audit 18 luglio 2026, branch `feature/growth-stats-v2`):** audit sul codice reale (`backend/main.py`, `frontend/index.html`, spec `docs/growth-analytics.md`, suite 106/106 verde) per verificare le due voci "Sett. 23 giu" contro quanto anticipato in Fase 3 (vedi "Nota (analytics anticipata)" lì). Esito: **nessun gap significativo, nessun codice nuovo scritto di proposito.** Mappatura voce-per-voce:
+- *Accuracy storica* → `avg_accuracy` su `GET /stats/summary` (media sulle sole partite analizzate), `accuracy` per-partita nella serie di `GET /stats/progress`, grafico trend `buildAccuracyChartSvg()` nella tab Crescita (buchi cronologici preservati per le partite non analizzate).
+- *ELO simulato* → update Elo classico K=32/seed 1200 in `GET /stats/progress` (`current_elo`/`peak_elo`, serie per-partita), grafico dedicato `buildEloChartSvg()`.
+- *Errori frequenti* → totali blunder/mistake/inaccuracy su `GET /stats/summary` + stat-card in Crescita, **più** il breakdown per fase di gioco e tema tattico già disponibile in `GET /training/weaknesses` (Fase 4) con la sua dashboard nella tab Allenamento. Duplicare quel breakdown anche in Crescita sarebbe ridondanza tra tab, non valore aggiunto — scartato di proposito.
+- *Ultimi 10 match* → blocco `recent` (window=10: `elo_change`, V-P-S, accuracy media della finestra) reso come stat-card in Crescita. Una *lista* degli ultimi 10 match duplicherebbe la tab Storico (già paginata/filtrabile) — scartata per lo stesso motivo.
+- *Trend accuracy* → grafico accuracy di cui sopra, stessa `buildTrendChartSvg()` condivisa col grafico ELO.
 
 ---
 
@@ -302,7 +309,7 @@ Giugno 2026
 ├── Sett. 2 giu   ████  Fase 4 — frontend pannello Allenamento  ✅ completato
 ├── Sett. 9 giu   ████  Fase 5 — eval chart  ✅ completato (anticipato)
 ├── Sett. 16 giu  ████  Fase 5 — aperture ECO  ← prossimo
-└── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard
+└── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard  ✅ già coperto (anticipo Fase 3, audit 18 lug)
 
 Luglio 2026
 ├── Sett. 30 giu  ████  Fase 6 — puzzle trainer (dataset esterno)
