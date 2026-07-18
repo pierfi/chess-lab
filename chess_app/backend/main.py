@@ -84,6 +84,17 @@ def elo_to_skill_depth(elo: int) -> tuple[int, int]:
 
 games: dict[str, dict] = {}
 
+class TimeControl(BaseModel):
+    """Tempo iniziale + incremento Fischer, in secondi. I preset bullet/blitz/
+    rapid sono una convenienza SOLO frontend (vedi index.html) — il backend
+    accetta qualunque coppia entro i limiti sotto:
+      bullet: 1+0 (60s), 2+1 (120s + 1s)
+      blitz:  3+2 (180s + 2s), 5+0 (300s)
+      rapid:  10+0 (600s), 15+10 (900s + 10s)
+    """
+    initial_seconds: int = Field(ge=15, le=10800)  # 15s..3h
+    increment_seconds: int = Field(default=0, ge=0, le=60)
+
 class NewGameRequest(BaseModel):
     player_color: str = Field(pattern=r"^(white|black)$")
     engine_elo: int = Field(ge=400, le=2800)
@@ -91,6 +102,9 @@ class NewGameRequest(BaseModel):
     # Non ancora usata da nessun endpoint dedicato: qui viene solo persistita e
     # propagata al chess.Board iniziale quando fornita.
     start_fen: str | None = Field(default=None)
+    # Controllo del tempo opzionale (Fase 6). None = partita non a tempo —
+    # comportamento storico invariato, nessun clock tracciato né persistito.
+    time_control: TimeControl | None = Field(default=None)
 
 class MoveRequest(BaseModel):
     game_id: str
@@ -155,6 +169,24 @@ def _load_game_from_db(game_id: str) -> dict | None:
         if move_rows and move_rows[-1].color == engine_color:
             last_engine_move = move_rows[-1].uci
 
+        # Time control: ricostruito dalle colonne persistite (il clock è la
+        # verità corrente scritta ad ogni mossa, non va ricalcolato da
+        # moves.think_ms — vedi db.py). None se la partita non è a tempo.
+        time_control = None
+        if row.initial_seconds is not None:
+            time_control = {
+                "initial_seconds": row.initial_seconds,
+                "increment_seconds": row.increment_seconds or 0,
+            }
+
+        # Un esito già deciso ma NON deducibile dalla board ricostruita (oggi:
+        # solo timeout — la mossa che ha fatto scattare la bandierina non viene
+        # mai applicata, vedi _debit_clock/_timeout_result) va recuperato dal
+        # risultato persistito, altrimenti sparirebbe dopo un cache-miss.
+        result_override = None
+        if row.result is not None and _check_game_over(board) is None:
+            result_override = {"result": row.result, "reason": row.result_reason}
+
         return {
             "board": board,
             "player_color": row.player_color,
@@ -163,8 +195,13 @@ def _load_game_from_db(game_id: str) -> dict | None:
             "last_engine_move": last_engine_move,
             "created_at": row.created_at.strftime("%Y.%m.%d"),
             "start_fen": row.start_fen,
+            "time_control": time_control,
+            "clock": {"white": row.white_clock_ms, "black": row.black_clock_ms},
+            "result_override": result_override,
             # last_ready_at assente: la prima mossa dopo un restart registra
-            # think_ms = NULL (comportamento atteso, vedi CLAUDE.md).
+            # think_ms = NULL (comportamento atteso, vedi CLAUDE.md) — di
+            # conseguenza quella mossa non debita il clock (stesso motivo:
+            # non c'è modo di sapere quanto tempo reale è passato).
         }
 
 def _get_game(game_id: str) -> dict:
@@ -191,8 +228,12 @@ def _build_pgn(game: dict) -> str:
     pgn_game.headers["Date"] = game["created_at"]
     pgn_game.headers["White"] = "Player" if game["player_color"] == "white" else "Stockfish"
     pgn_game.headers["Black"] = "Stockfish" if game["player_color"] == "white" else "Player"
-    if board.is_game_over():
-        pgn_game.headers["Result"] = board.result()
+    tc = game.get("time_control")
+    if tc:
+        pgn_game.headers["TimeControl"] = f"{tc['initial_seconds']}+{tc['increment_seconds']}"
+    over = _game_over_info(game)
+    if over:
+        pgn_game.headers["Result"] = over["result"]
     node = pgn_game
     for move in game["move_objects"]:
         node = node.add_variation(move)
@@ -201,9 +242,12 @@ def _build_pgn(game: dict) -> str:
 def _board_to_state(game_id: str, game: dict) -> dict:
     board = game["board"]
 
-    result = None
-    if board.is_game_over():
-        result = board.result()
+    # is_game_over/result passano da _game_over_info, non più da board.is_game_over()
+    # diretto: un esito per bandierina (timeout) non è deducibile dalla board, la
+    # mossa che ha fatto scattare il flag non viene mai applicata — vedi
+    # _debit_clock. Per una partita non a tempo (result_override sempre None)
+    # il comportamento resta identico a prima (_check_game_over(board)).
+    over = _game_over_info(game)
 
     san_history = []
     replay_board = _starting_board(game.get("start_fen"))
@@ -217,13 +261,17 @@ def _board_to_state(game_id: str, game: dict) -> dict:
         "pgn": _build_pgn(game),
         "turn": "white" if board.turn == chess.WHITE else "black",
         "is_check": board.is_check(),
-        "is_game_over": board.is_game_over(),
-        "result": result,
+        "is_game_over": over is not None,
+        "result": over["result"] if over else None,
         "last_engine_move": game["last_engine_move"],
         "move_history": [m.uci() for m in game["move_objects"]],
         "move_history_san": san_history,
         "player_color": game["player_color"],
         "engine_elo": game["engine_elo"],
+        # None se la partita non è a tempo (comportamento storico); altrimenti
+        # {"initial_seconds", "increment_seconds"} e {"white": ms, "black": ms}.
+        "time_control": game.get("time_control"),
+        "clock": game.get("clock"),
     }
 
 def _engine_move(board: chess.Board, elo: int) -> tuple[chess.Move, float]:
@@ -266,6 +314,52 @@ def _check_game_over(board: chess.Board) -> dict | None:
     elif board.can_claim_threefold_repetition():
         reason = "threefold_repetition"
     return {"result": result, "reason": reason}
+
+# -------------------------------------------------------------------
+# Time control (Fase 6): clock digitale con incremento Fischer. Riusa la
+# stessa misurazione del tempo di riflessione già stabilita in Fase 3 per
+# think_ms (last_ready_at per il player, elapsed reale per l'engine — vedi
+# _engine_move) invece di inventare un secondo meccanismo di timing. Estende
+# lo STESSO pattern di _check_game_over (dict {"result","reason"}) con
+# "timeout" come nuovo result_reason, non un meccanismo parallelo.
+# -------------------------------------------------------------------
+
+def _timeout_result(loser_color: str) -> str:
+    """Stringa risultato in stile chess.Board.result() per chi ha perso per
+    bandierina: 0-1 se è scaduto il tempo al bianco, 1-0 se al nero."""
+    return "0-1" if loser_color == "white" else "1-0"
+
+def _debit_clock(game: dict, color: str, elapsed_ms: int) -> bool:
+    """Sottrae elapsed_ms al clock di ``color``. Ritorna True se il tempo è
+    sceso a zero o sotto (bandierina). No-op — ritorna sempre False — se la
+    partita non è a tempo (game["time_control"] è None): questo rende sicuro
+    chiamarla incondizionatamente in /game/move senza if espliciti sparsi nel
+    flusso. Il clock è clampato a 0, mai negativo, in risposta/persistenza."""
+    if not game.get("time_control"):
+        return False
+    clock = game["clock"]
+    remaining = clock[color] - elapsed_ms
+    if remaining <= 0:
+        clock[color] = 0
+        return True
+    clock[color] = remaining
+    return False
+
+def _apply_increment(game: dict, color: str) -> None:
+    """Aggiunge l'incremento Fischer al clock di ``color`` dopo una mossa
+    completata in tempo (mai su una mossa che ha fatto scattare la bandierina).
+    No-op se la partita non è a tempo."""
+    tc = game.get("time_control")
+    if not tc:
+        return
+    game["clock"][color] += tc["increment_seconds"] * 1000
+
+def _game_over_info(game: dict) -> dict | None:
+    """Motivo di fine partita, con priorità a un esito già deciso fuori dalla
+    board (oggi: solo timeout — la mossa che ha fatto scattare la bandierina
+    non viene mai applicata, quindi non è deducibile da chess.Board). Scacco
+    matto/stallo/patta restano gestiti da _check_game_over, invariato."""
+    return game.get("result_override") or _check_game_over(game["board"])
 
 def _classify(loss_cp: int) -> str:
     if loss_cp >= 200:
@@ -505,7 +599,9 @@ def _persist_new_game(
     """Inserisce la riga games alla creazione (+ l'eventuale mossa d'apertura
     dell'engine se il player è nero). ``source`` distingue una partita normale
     ('play', default) da un drill di finali ('endgame_drill', Fase 4)."""
-    over = _check_game_over(game["board"])
+    over = _game_over_info(game)  # include l'eventuale timeout sulla mossa d'apertura
+    tc = game.get("time_control")
+    clock = game.get("clock") or {}
     with session_scope() as db:
         db.add(Game(
             id=game_id,
@@ -518,19 +614,26 @@ def _persist_new_game(
             result=over["result"] if over else None,
             result_reason=over["reason"] if over else None,
             finished_at=created_at if over else None,
+            initial_seconds=tc["initial_seconds"] if tc else None,
+            increment_seconds=tc["increment_seconds"] if tc else None,
+            white_clock_ms=clock.get("white"),
+            black_clock_ms=clock.get("black"),
         ))
         if first_move is not None:
             db.add(Move(game_id=game_id, created_at=created_at, **first_move))
 
 def _persist_move_batch(game_id: str, game: dict, pending: list[dict], over: dict | None) -> None:
     """Persiste le righe moves prodotte da una richiesta /game/move e aggiorna
-    lo snapshot denormalizzato (pgn) + gli esiti di fine partita, in una sola
-    sessione. Se la riga games manca (partita creata fuori da /game/new) la
-    crea difensivamente, così ogni mossa finisce comunque nel DB durevole."""
+    lo snapshot denormalizzato (pgn) + il clock corrente + gli esiti di fine
+    partita, in una sola sessione. Se la riga games manca (partita creata fuori
+    da /game/new) la crea difensivamente, così ogni mossa finisce comunque nel
+    DB durevole. ``pending`` può essere vuota (bandierina: nessuna mossa
+    applicata in questa chiamata, solo l'esito timeout va persistito)."""
     now = utcnow()
     with session_scope() as db:
         row = db.get(Game, game_id)
         if row is None:
+            tc = game.get("time_control")
             row = Game(
                 id=game_id,
                 player_color=game["player_color"],
@@ -538,11 +641,16 @@ def _persist_move_batch(game_id: str, game: dict, pending: list[dict], over: dic
                 start_fen=game.get("start_fen"),
                 source="play",
                 created_at=now,
+                initial_seconds=tc["initial_seconds"] if tc else None,
+                increment_seconds=tc["increment_seconds"] if tc else None,
             )
             db.add(row)
         for mv in pending:
             db.add(Move(game_id=game_id, created_at=now, **mv))
         row.pgn = _build_pgn(game)
+        clock = game.get("clock") or {}
+        row.white_clock_ms = clock.get("white")
+        row.black_clock_ms = clock.get("black")
         if over:
             row.result = over["result"]
             row.result_reason = over["reason"]
@@ -613,6 +721,24 @@ def _create_new_game(req: NewGameRequest, source: str = "play") -> dict:
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid start_fen")
 
+    # Time control opzionale: None (default) = partita non a tempo, nessun
+    # clock tracciato — comportamento storico identico. req.time_control è
+    # None per EndgameStartRequest/import (nessuno dei due espone il campo),
+    # quindi drill e import restano sempre non a tempo, fuori scope qui.
+    time_control = None
+    if req.time_control is not None:
+        time_control = {
+            "initial_seconds": req.time_control.initial_seconds,
+            "increment_seconds": req.time_control.increment_seconds,
+        }
+    if time_control:
+        clock = {
+            "white": time_control["initial_seconds"] * 1000,
+            "black": time_control["initial_seconds"] * 1000,
+        }
+    else:
+        clock = {"white": None, "black": None}
+
     created_at = utcnow()
     game = {
         "board": board,
@@ -622,6 +748,9 @@ def _create_new_game(req: NewGameRequest, source: str = "play") -> dict:
         "last_engine_move": None,
         "created_at": created_at.strftime("%Y.%m.%d"),
         "start_fen": req.start_fen,
+        "time_control": time_control,
+        "clock": clock,
+        "result_override": None,
     }
 
     # Turno iniziale dedotto dalla board: bianco per la posizione standard, ma
@@ -633,20 +762,34 @@ def _create_new_game(req: NewGameRequest, source: str = "play") -> dict:
     initial_turn = "white" if board.turn == chess.WHITE else "black"
     first_move = None
     if req.player_color != initial_turn:
+        engine_color = initial_turn
         fen_before = board.fen()
         engine_m, elapsed = _engine_move(board, req.engine_elo)
-        san = board.san(engine_m)  # SAN calcolata PRIMA del push
-        board.push(engine_m)
-        game["move_objects"].append(engine_m)
-        game["last_engine_move"] = engine_m.uci()
-        first_move = {
-            "ply": 1,
-            "color": initial_turn,
-            "uci": engine_m.uci(),
-            "san": san,
-            "fen_before": fen_before,
-            "think_ms": round(elapsed * 1000),
-        }
+        engine_think_ms = round(elapsed * 1000)
+        # Bandierina dell'engine sulla mossa d'apertura: caso limite (time
+        # control validissimo ma troppo corto per la depth richiesta ad alto
+        # ELO) gestito per coerenza col resto del flusso di /game/move, non
+        # solo per completezza teorica — vedi _debit_clock per il perché si
+        # debita con l'elapsed reale, mai col sleep cosmetico.
+        if _debit_clock(game, engine_color, engine_think_ms):
+            game["result_override"] = {
+                "result": _timeout_result(engine_color),
+                "reason": "timeout",
+            }
+        else:
+            _apply_increment(game, engine_color)
+            san = board.san(engine_m)  # SAN calcolata PRIMA del push
+            board.push(engine_m)
+            game["move_objects"].append(engine_m)
+            game["last_engine_move"] = engine_m.uci()
+            first_move = {
+                "ply": 1,
+                "color": initial_turn,
+                "uci": engine_m.uci(),
+                "san": san,
+                "fen_before": fen_before,
+                "think_ms": engine_think_ms,
+            }
 
     games[game_id] = game
     _persist_new_game(game_id, game, created_at, first_move, source=source)
@@ -664,11 +807,13 @@ def make_move(req: MoveRequest):
     game = _get_game(req.game_id)
     board = game["board"]
 
-    if board.is_game_over():
+    if _game_over_info(game) is not None:
         raise HTTPException(status_code=400, detail="Game is already over")
 
     # Verifica turno del player
-    player_turn = chess.WHITE if game["player_color"] == "white" else chess.BLACK
+    player_color = game["player_color"]
+    engine_color = "black" if player_color == "white" else "white"
+    player_turn = chess.WHITE if player_color == "white" else chess.BLACK
     if board.turn != player_turn:
         raise HTTPException(status_code=400, detail="Not your turn")
 
@@ -682,14 +827,32 @@ def make_move(req: MoveRequest):
         raise HTTPException(status_code=400, detail="Illegal move")
 
     # Think time del player: da quando la risposta precedente gli ha ridato il
-    # turno (marker last_ready_at) fino ad ora. Assente dopo un restart → NULL.
+    # turno (marker last_ready_at) fino ad ora. Assente dopo un restart → NULL,
+    # e per lo stesso motivo il clock non viene debitato per questa mossa: non
+    # c'è modo di sapere quanto tempo reale è passato durante il gap.
     last_ready = game.get("last_ready_at")
     player_think_ms = (
         round((time.monotonic() - last_ready) * 1000) if last_ready is not None else None
     )
 
-    player_color = game["player_color"]
-    engine_color = "black" if player_color == "white" else "white"
+    # Bandierina del player: se il pensiero ha esaurito il clock, la partita
+    # finisce QUI e la mossa appena inviata NON viene applicata — il flag è
+    # scattato mentre ci pensava, non dopo che l'ha giocata. _debit_clock è
+    # un no-op (ritorna sempre False) se la partita non è a tempo.
+    # NB: l'incremento va applicato SOLO se il clock è stato effettivamente
+    # debitato per questa mossa (player_think_ms noto) — altrimenti (post-
+    # restart, vedi sopra) accrediteremmo un incremento "gratis" senza aver
+    # sottratto nulla, un'asimmetria ingiustificata sul clock persistito.
+    if player_think_ms is not None:
+        if _debit_clock(game, player_color, player_think_ms):
+            over = {"result": _timeout_result(player_color), "reason": "timeout"}
+            game["result_override"] = over
+            _persist_move_batch(req.game_id, game, [], over)
+            state = _board_to_state(req.game_id, game)
+            state["game_over"] = over
+            return state
+        _apply_increment(game, player_color)
+
     pending: list[dict] = []
 
     # Esegui mossa player (SAN e fen_before catturati PRIMA del push)
@@ -716,9 +879,28 @@ def make_move(req: MoveRequest):
         game["last_ready_at"] = time.monotonic()
         return state
 
-    # Mossa Stockfish (think_ms = wall-time reale della ricerca, no padding)
+    # Mossa Stockfish (think_ms = wall-time reale della ricerca, no padding —
+    # stesso dato usato per debitare il clock engine, vedi CLAUDE.md sul
+    # perché nessun floor artificiale viene aggiunto: a ELO basso la ricerca è
+    # quasi istantanea e l'engine non rischia praticamente mai la bandierina,
+    # per scelta esplicita di design (onestà del dato), non per un bug).
     engine_fen_before = board.fen()
     engine_m, elapsed = _engine_move(board, game["engine_elo"])
+    engine_think_ms = round(elapsed * 1000)
+
+    # Bandierina dell'engine: stesso trattamento simmetrico del player — la
+    # mossa appena calcolata non viene applicata, il flag scatta "durante" la
+    # ricerca, non dopo.
+    if _debit_clock(game, engine_color, engine_think_ms):
+        over = {"result": _timeout_result(engine_color), "reason": "timeout"}
+        game["result_override"] = over
+        _persist_move_batch(req.game_id, game, pending, over)
+        state = _board_to_state(req.game_id, game)
+        state["game_over"] = over
+        game["last_ready_at"] = time.monotonic()
+        return state
+    _apply_increment(game, engine_color)
+
     engine_san = board.san(engine_m)
     board.push(engine_m)
     game["move_objects"].append(engine_m)
@@ -729,7 +911,7 @@ def make_move(req: MoveRequest):
         "uci": engine_m.uci(),
         "san": engine_san,
         "fen_before": engine_fen_before,
-        "think_ms": round(elapsed * 1000),
+        "think_ms": engine_think_ms,
     })
 
     # Controlla game-over dopo mossa engine
@@ -753,7 +935,7 @@ def game_hint(game_id: str, req: HintRequest):
     game = _get_game(game_id)
     board = game["board"]
 
-    if board.is_game_over():
+    if _game_over_info(game) is not None:
         raise HTTPException(status_code=400, detail="Game is already over")
 
     # Hint-engine separato dal play-engine, indipendente dall'ELO scelto per la
@@ -817,7 +999,7 @@ def game_threats(game_id: str):
     game = _get_game(game_id)
     board = game["board"]
 
-    if board.is_game_over():
+    if _game_over_info(game) is not None:
         raise HTTPException(status_code=400, detail="Game is already over")
 
     me = board.turn

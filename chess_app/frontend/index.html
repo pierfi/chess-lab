@@ -114,6 +114,38 @@ body {
 
 .board-container { flex-shrink: 0; }
 
+/* Clock digitale (Fase 6): un box sopra la board (avversario/engine) e uno
+   sotto (player), stile Lichess — orientamento fisso indipendente dalla
+   rotazione della board (l'avversario è sempre in alto). Nascosti di default,
+   mostrati solo per una partita a tempo (state.timeControl != null). */
+.clock-box {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  margin: 4px 0;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.clock-name { font-size: 12px; color: var(--text-dim); }
+
+.clock-time {
+  font-family: 'Courier New', monospace;
+  font-size: 20px;
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* Lato al tratto: bordo verde, coerente con .status-bar.status-turn */
+.clock-box.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.clock-box.active .clock-time { color: var(--accent-dark); }
+
+/* Tempo basso (<10s): rosso pulsante, stesso ritmo di .thinking-dot */
+.clock-box.low .clock-time { color: var(--red); animation: pulse 1s infinite; }
+
 .board {
   display: grid;
   grid-template-columns: repeat(8, 60px);
@@ -660,6 +692,30 @@ body {
 
 .side-row .side-icon { font-size: 30px; line-height: 1; }
 
+/* Preset tempo (Fase 6): stessa "chip" del side-row, ma in riga che va a capo
+   (7 opzioni, "Nessun limite" + 6 preset bullet/blitz/rapid) — il backend
+   accetta qualunque initial+increment, questi sono solo comodità frontend. */
+.time-row { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+
+.time-row button {
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.time-row button:hover { background: #ececea; }
+
+.time-row button.active {
+  background: var(--accent);
+  border-color: var(--accent-dark);
+  color: #fff;
+  font-weight: bold;
+}
+
 .setup-submit {
   display: block;
   margin: 0 auto;
@@ -935,7 +991,15 @@ body {
       <div class="eval-fill" id="eval-fill"></div>
     </div>
     <div class="board-container">
+      <div class="clock-box" id="clock-top">
+        <span class="clock-name" id="clock-top-name">Avversario</span>
+        <span class="clock-time" id="clock-top-time">--:--</span>
+      </div>
       <div class="board-wrapper" id="board-wrapper"></div>
+      <div class="clock-box" id="clock-bottom">
+        <span class="clock-name">Tu</span>
+        <span class="clock-time" id="clock-bottom-time">--:--</span>
+      </div>
       <div class="status-bar" id="status">Nessuna partita in corso</div>
     </div>
   </div>
@@ -1137,6 +1201,10 @@ body {
         <button data-side="white" onclick="selectSide('white')"><span class="side-icon">&#9812;</span>Bianco</button>
       </div>
     </div>
+    <div class="setup-section">
+      <div class="setup-label">Tempo</div>
+      <div class="time-row" id="time-row"></div>
+    </div>
     <button class="btn btn-primary setup-submit" onclick="submitSetup()">Gioca contro Stockfish</button>
   </div>
 </div>
@@ -1189,6 +1257,8 @@ let state = {
   hintElo: null,          // forza hint engine (ELO); null = piena forza (default)
   showThreats: true,      // sotto-toggle "pezzi in presa": default ON in assistita
   threats: [],            // caselle dei propri pezzi in presa (da GET /threats)
+  timeControl: null,      // {initial_seconds, increment_seconds} | null — da data.time_control
+  clock: null,            // {white: ms, black: ms} | null — da data.clock (rimanente al server)
 };
 
 // Pezzi come veri asset SVG (set Cburnett di Lichess, frontend/pieces/*.svg),
@@ -1859,6 +1929,11 @@ function updateState(data) {
   state.moveHistory = data.move_history;
   state.moveHistorySan = data.move_history_san || [];
   state.pgn = data.pgn || null;
+  // time_control/clock sono SEMPRE presenti nella risposta (vedi backend
+  // _board_to_state): null/{white:null,black:null} per una partita non a
+  // tempo, un oggetto valorizzato altrimenti — mai un campo assente.
+  state.timeControl = data.time_control || null;
+  state.clock = data.clock || null;
   updateExportButton();
 
   if (data.move_history.length >= 1) {
@@ -1887,6 +1962,10 @@ function updateState(data) {
   // Refresh dei pezzi in presa ad ogni cambio di posizione, indipendente dal
   // /hint on-demand (le guardie interne lo rendono un no-op fuori condizione)
   fetchThreats();
+
+  // Riconcilia il clock digitale con lo stato server: azzera qualunque deriva
+  // accumulata dal countdown client-side dell'ultima risposta.
+  clockReconcile();
 }
 
 // ---------- Export PGN ----------
@@ -1925,6 +2004,78 @@ function renderMoveList() {
   el.scrollTop = el.scrollHeight;
 }
 
+// ---------- Clock digitale (Fase 6) ----------
+//
+// Il server è l'unica fonte di verità del tempo rimanente (debitato solo
+// dentro /game/move, dal think time reale — vedi CLAUDE.md "Timing"): qui si
+// fa solo un conto alla rovescia PREVISIONALE lato client per dare un feedback
+// continuo tra una risposta e l'altra, sempre riazzerato su clockReconcile()
+// (chiamata da updateState ad ogni risposta). Nessun polling/websocket in
+// questa fase: se il countdown locale tocca 0 senza che parta una nuova
+// richiesta, resta fermo a 0:00 finché non arriva la prossima risposta dal
+// server a confermare (o smentire) la bandierina — limite noto, risolto dal
+// WebSocket già a roadmap più avanti in Fase 6.
+let clockTimer = null;
+let clockRefTs = null;      // performance.now() all'ultima riconciliazione
+let clockRefValues = null;  // snapshot {white, black} del server a quel momento
+
+function formatClock(ms) {
+  if (ms == null) return '--:--';
+  const totalSec = Math.floor(Math.max(0, ms) / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function clockReconcile() {
+  clockRefTs = performance.now();
+  clockRefValues = state.clock ? { ...state.clock } : null;
+  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+  if (state.timeControl && state.clock && !state.isGameOver) {
+    clockTimer = setInterval(tickClocks, 250);
+  }
+  renderClocks(clockRefValues);
+}
+
+function tickClocks() {
+  if (!clockRefValues) return;
+  const elapsed = performance.now() - clockRefTs;
+  const display = { ...clockRefValues };
+  // Solo il lato al tratto perde tempo visivamente tra due risposte — il
+  // debito reale (mai negativo, mai oltre il clock effettivo) avviene lato
+  // server dentro /game/move; questo è solo il preview, sempre riconciliato.
+  const side = state.turn;
+  if (display[side] != null) {
+    display[side] = Math.max(0, display[side] - elapsed);
+  }
+  renderClocks(display);
+}
+
+function renderClocks(display) {
+  const top = document.getElementById('clock-top');
+  const bottom = document.getElementById('clock-bottom');
+  if (!state.timeControl || !state.clock) {
+    top.style.display = 'none';
+    bottom.style.display = 'none';
+    return;
+  }
+  const d = display || state.clock;
+  const engineColor = state.playerColor === 'white' ? 'black' : 'white';
+  top.style.display = 'flex';
+  bottom.style.display = 'flex';
+  document.getElementById('clock-top-time').textContent = formatClock(d[engineColor]);
+  document.getElementById('clock-bottom-time').textContent = formatClock(d[state.playerColor]);
+  const topActive = !state.isGameOver && state.turn === engineColor;
+  const bottomActive = !state.isGameOver && state.turn === state.playerColor;
+  top.classList.toggle('active', topActive);
+  bottom.classList.toggle('active', bottomActive);
+  top.classList.toggle('low', d[engineColor] != null && d[engineColor] < 10000);
+  bottom.classList.toggle('low', d[state.playerColor] != null && d[state.playerColor] < 10000);
+}
+
 function showGameOver(info) {
   const banner = document.getElementById('game-over-banner');
   const reasons = {
@@ -1933,6 +2084,7 @@ function showGameOver(info) {
     insufficient_material: 'Materiale insufficiente',
     fifty_moves: 'Regola 50 mosse',
     threefold_repetition: 'Ripetizione tripla',
+    timeout: 'Tempo scaduto',
   };
   const reasonText = reasons[info.reason] || info.reason || 'Partita terminata';
 
@@ -1958,7 +2110,20 @@ function setStatus(html, cls) {
 // Ogni livello Forza corrisponde a una fascia distinta del mapping ELO -> Skill del backend
 const STRENGTH_ELO = [400, 900, 1100, 1300, 1500, 1700, 1900, 2400];
 
-let setup = { strength: 3, side: 'white' };
+// Preset bullet/blitz/rapid (Fase 6): comodità SOLO frontend sopra la coppia
+// arbitraria initial_seconds+increment_seconds accettata dal backend (che non
+// conosce il concetto di "bullet"/"blitz"/ecc. — vedi TimeControl in main.py).
+const TIME_PRESETS = [
+  { id: 'none',    label: 'Nessun limite', initial: null, increment: null },
+  { id: 'bullet1', label: 'Bullet 1+0',    initial: 60,   increment: 0 },
+  { id: 'bullet2', label: 'Bullet 2+1',    initial: 120,  increment: 1 },
+  { id: 'blitz3',  label: 'Blitz 3+2',     initial: 180,  increment: 2 },
+  { id: 'blitz5',  label: 'Blitz 5+0',     initial: 300,  increment: 0 },
+  { id: 'rapid10', label: 'Rapid 10+0',    initial: 600,  increment: 0 },
+  { id: 'rapid15', label: 'Rapid 15+10',   initial: 900,  increment: 10 },
+];
+
+let setup = { strength: 3, side: 'white', time: 'none' };
 
 function renderSetup() {
   const row = document.getElementById('strength-row');
@@ -1975,6 +2140,16 @@ function renderSetup() {
   document.querySelectorAll('.side-row button').forEach(b => {
     b.classList.toggle('active', b.dataset.side === setup.side);
   });
+
+  const timeRow = document.getElementById('time-row');
+  timeRow.innerHTML = '';
+  TIME_PRESETS.forEach(p => {
+    const btn = document.createElement('button');
+    btn.textContent = p.label;
+    btn.classList.toggle('active', setup.time === p.id);
+    btn.onclick = () => selectTimePreset(p.id);
+    timeRow.appendChild(btn);
+  });
 }
 
 function selectStrength(n) {
@@ -1985,6 +2160,20 @@ function selectStrength(n) {
 function selectSide(side) {
   setup.side = side;
   renderSetup();
+}
+
+function selectTimePreset(id) {
+  setup.time = id;
+  renderSetup();
+}
+
+// {initial_seconds, increment_seconds} da inviare a /game/new, oppure null
+// per "Nessun limite" — stesso shape del campo opzionale TimeControl del
+// backend, così submitSetup/startGame lo passano attraverso senza tradurlo.
+function selectedTimeControlBody() {
+  const preset = TIME_PRESETS.find(p => p.id === setup.time);
+  if (!preset || preset.initial == null) return null;
+  return { initial_seconds: preset.initial, increment_seconds: preset.increment };
 }
 
 function openSetup() {
@@ -2052,16 +2241,23 @@ function resetPlayUi() {
   state.hintLoading = false;
   threatSeq++;             // idem for any in-flight /threats response
   state.threats = [];
+  state.timeControl = null;
+  state.clock = null;
+  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+  renderClocks();
 }
 
 async function startGame() {
   resetPlayUi();
   setStatus('Creazione partita...');
   try {
+    const body = { player_color: state.playerColor, engine_elo: state.engineElo };
+    const timeControl = selectedTimeControlBody();
+    if (timeControl) body.time_control = timeControl;
     const r = await fetch(API + '/game/new', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ player_color: state.playerColor, engine_elo: state.engineElo }),
+      body: JSON.stringify(body),
     });
     const data = await r.json();
     state.gameId = data.game_id;

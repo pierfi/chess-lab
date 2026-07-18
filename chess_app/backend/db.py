@@ -124,6 +124,16 @@ class Game(Base):
     mistakes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     inaccuracies: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Time control (Fase 6). NULL su initial_seconds = partita non a tempo,
+    # comportamento storico invariato (nessun clock tracciato/persistito).
+    # white_clock_ms/black_clock_ms sono il tempo RIMANENTE, aggiornato ad ogni
+    # persistenza di mossa (write-through, stesso pattern di games.pgn) — la
+    # verità corrente del clock, non ricavata a posteriori da moves.think_ms.
+    initial_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    increment_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    white_clock_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    black_clock_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     moves: Mapped[list["Move"]] = relationship(
         back_populates="game",
         cascade="all, delete-orphan",

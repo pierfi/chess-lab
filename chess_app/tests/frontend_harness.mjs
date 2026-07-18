@@ -60,6 +60,7 @@ await ev("sendMove('e2e4')");
 check('sendMove aggiorna history (player+engine)', ev('state.moveHistory.length') === 2, ev('state.moveHistory.join(",")'));
 check('move list mostra SAN', $('move-list').textContent.includes('e4'));
 check('assisted off: toggle pezzi in presa nascosto', $('threat-toggle').style.display !== 'block');
+check('time control: partita non a tempo -> clock nascosti', ev('state.timeControl') === null && $('clock-top').style.display !== 'flex');
 
 // ---- Assisted mode: hint + eval bar + frecce + sotto-toggle in presa ----
 ev('toggleAssisted()');
@@ -78,6 +79,73 @@ await ev('requestAnalysis()');
 check('analisi: sezione visibile', $('analysis').classList.contains('visible'));
 check('analisi: eval chart SVG', $('eval-chart').innerHTML.includes('<svg'));
 check('analisi: tabella due colonne', window.document.querySelectorAll('.analysis-row').length > 0);
+
+// ---- Time control (Fase 6): preset selector, digital clock, bandierina ----
+ev('openSetup()');
+check('time control: 7 preset nel selettore (incl. "Nessun limite")',
+  window.document.querySelectorAll('#time-row button').length === 7);
+const bulletBtn = [...window.document.querySelectorAll('#time-row button')]
+  .find(b => b.textContent.includes('Bullet 1+0'));
+bulletBtn.click();  // click DOM reale, non ev() diretto sullo state
+check('time control: click preset aggiorna setup.time', ev('setup.time') === 'bullet1');
+ev("closeSetup(); state.playerColor = 'white'; state.engineElo = 400;");
+await ev('startGame()');  // bypassa requestGameStart/confirm modal, stesso pattern del resto dell'harness
+check('time control: nuova partita a tempo creata', !!ev('state.gameId'));
+check('time control: state.timeControl = 1+0 (60s, incremento 0)',
+  ev('state.timeControl.initial_seconds') === 60 && ev('state.timeControl.increment_seconds') === 0);
+check('time control: clock iniziali a 60000ms per lato',
+  ev('state.clock.white') === 60000 && ev('state.clock.black') === 60000);
+check('time control: box clock visibili (partita a tempo)',
+  $('clock-top').style.display === 'flex' && $('clock-bottom').style.display === 'flex');
+check('time control: clock del player (bottom, bianco) attivo — tocca a lui',
+  $('clock-bottom').classList.contains('active'));
+check('time control: clock avversario (top) non attivo',
+  !$('clock-top').classList.contains('active'));
+
+// Countdown previsionale client-side: dopo >1s deve essere sceso sotto il valore iniziale,
+// riconciliato solo alla prossima risposta server (nessun polling in questa fase, per design).
+await sleep(1100);
+const bottomSecs = $('clock-bottom-time').textContent;
+check('time control: countdown client-side sceso sotto 1:00',
+  bottomSecs !== '01:00' && bottomSecs !== '60:00', bottomSecs);
+
+// Una mossa reale riconcilia il clock col valore autoritativo del server.
+await ev("sendMove('e2e4')");
+check('time control: clock riconciliato dal server dopo la mossa (< iniziale)',
+  ev('state.clock.white') < 60000 && ev('state.clock.white') > 0, ev('state.clock.white'));
+
+// Bandierina: la UI di game-over (banner + testo + classi clock) è verificata
+// iniettando uno stato sintetico via updateState() — stesso pattern già usato
+// più sotto per "in presa" (window.__presa) — senza dover davvero aspettare
+// il timeout reale lato server (coperto invece dai test pytest dedicati).
+window.__timeoutPayload = {
+  fen: ev('state.fen'),
+  turn: 'white',
+  is_game_over: true,
+  is_check: false,
+  move_history: JSON.parse(ev('JSON.stringify(state.moveHistory)')),
+  move_history_san: JSON.parse(ev('JSON.stringify(state.moveHistorySan)')),
+  pgn: ev('state.pgn'),
+  result: '0-1',
+  time_control: { initial_seconds: 60, increment_seconds: 0 },
+  clock: { white: 0, black: 45000 },
+  game_over: { result: '0-1', reason: 'timeout' },
+};
+ev('updateState(window.__timeoutPayload)');
+check('bandierina: banner mostra "Tempo scaduto"',
+  $('game-over-banner').textContent.includes('Tempo scaduto'), $('game-over-banner').textContent);
+check('bandierina: clock del flaggato (bianco, bottom) sotto soglia bassa',
+  $('clock-bottom').classList.contains('low'));
+check('bandierina: clock avversario (nero, top) non in soglia bassa',
+  !$('clock-top').classList.contains('low'));
+check('bandierina: nessun clock resta "active" a partita finita',
+  !$('clock-top').classList.contains('active') && !$('clock-bottom').classList.contains('active'));
+
+// Nuova partita SENZA time control: i clock tornano nascosti (resetPlayUi pulisce lo stato).
+ev("state.playerColor = 'white'; state.engineElo = 400; setup.time = 'none';");
+await ev('startGame()');
+check('time control: nuova partita "Nessun limite" nasconde di nuovo i clock',
+  ev('state.timeControl') === null && $('clock-top').style.display !== 'flex');
 
 // ---- Pezzi in presa: posizione deterministica via start_fen ----
 // Cavallo bianco d4 attaccato dal pedone e5 e indifeso -> unico pezzo in presa.

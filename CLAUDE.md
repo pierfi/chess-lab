@@ -253,13 +253,26 @@ Obiettivo: trasformare l'app in un vero trainer con feedback quantitativo sui pr
 
 Obiettivo: funzionalità avanzate per rendere il training più vario e coinvolgente.
 
-| Settimana | Attività | Ore stimate | Modello suggerito |
-|-----------|----------|-------------|-------------------|
-| Sett. 30 giu | Modalità puzzle: FEN custom, mossa corretta unica, feedback immediato | ~4 ore | Opus |
-| Sett. 7 lug | Time control: clock digitale, bullet/blitz/rapid, Fischer increment | ~3 ore | Sonnet |
-| Sett. 14 lug | WebSocket: aggiornamenti live, supporto multi-tab | ~3 ore | Opus |
+**Stato:** il **time control** (clock digitale + incremento Fischer) è **completato** (18 luglio 2026, branch `feature/time-control`, 19 nuovi test — 125/125 nella suite backend + harness jsdom esteso, 57/57 check). Modalità puzzle (dataset esterno) e WebSocket restano da fare.
+
+| Settimana | Attività | Ore stimate | Modello suggerito | Stato |
+|-----------|----------|-------------|-------------------|-------|
+| Sett. 30 giu | Modalità puzzle: FEN custom, mossa corretta unica, feedback immediato | ~4 ore | Opus | 🔲 |
+| Sett. 7 lug | Time control: clock digitale, bullet/blitz/rapid, Fischer increment | ~3 ore | Sonnet | ✅ fatto |
+| Sett. 14 lug | WebSocket: aggiornamenti live, supporto multi-tab | ~3 ore | Opus | 🔲 |
 
 **Nota:** il dataset Lichess puzzles (CSV ~50 MB) richiede un import script separato e uno schema dedicato. Valutare se incluso in Fase 6 o posticipato. Puzzle da dataset esterno, distinti dai puzzle self-generated di Fase 4.
+
+#### Time control — dettagli implementazione (18 luglio 2026)
+
+Campo opzionale `time_control: {initial_seconds, increment_seconds} | null` su `NewGameRequest`/`POST /game/new`. `null` (default) = partita non a tempo — **no-op logico completo**: nessun clock debitato, nessuna bandierina, nessuna colonna DB valorizzata. I preset bullet/blitz/rapid sono **solo una comodità frontend** (select nel modal impostazioni: 1+0, 2+1, 3+2, 5+0, 10+0, 15+10) sopra la coppia arbitraria `initial_seconds`+`increment_seconds` che il backend accetta (15s–3h, incremento 0–60s) — il backend non conosce il concetto di "bullet"/"blitz".
+
+- **Riuso del meccanismo di timing di Fase 3, non un secondo sistema.** Il clock si debita con lo **stesso dato** già usato per `moves.think_ms`: `last_ready_at`/`time.monotonic()` per il player, `elapsed` reale della ricerca Stockfish (misurato **prima** del `sleep` cosmetico di pacing) per l'engine — mai il padding UX. Se `last_ready_at` è assente (mossa post-restart/cache-miss, stesso caso limite già documentato in Fase 3) il clock per quella mossa **non viene né debitato né incrementato**: un bug scoperto in review (l'incremento veniva accreditato comunque, un "regalo" senza debito corrispondente) è stato corretto avvolgendo debito+incremento nello stesso `if player_think_ms is not None`, coperto dal test `test_untimed_moves_do_not_credit_free_increment_after_cache_miss`.
+- **Bandierina (`result_reason: "timeout"`).** Stesso pattern dict `{"result","reason"}` di `_check_game_over()`, non un meccanismo parallelo — `_game_over_info()` fa da unione (`result_override or _check_game_over(board)`). La mossa che fa scattare la bandierina **non viene mai applicata**: il flag scatta "durante" il pensiero/la ricerca, non dopo. Simmetrico per entrambi i lati — sia sul player (controllato prima di validare la mossa) sia sull'engine (controllato dopo l'elapsed reale, prima di eseguire `board.push()`), incluso il caso limite della mossa d'apertura dell'engine quando il player è nero.
+- **Persistenza.** 4 colonne nuove su `games` (`initial_seconds`, `increment_seconds`, `white_clock_ms`, `black_clock_ms`), migration Alembic in batch mode (`6bab8cd6dbe4_add_time_control_columns.py`, verificata con upgrade→downgrade→upgrade su un DB scratch). Il clock è scritto write-through ad ogni persistenza di mossa (stesso pattern di `games.pgn`). **Il timeout non è deducibile dalla board ricostruita** dopo un cache-miss (la mossa che ha flaggato non è mai stata applicata) — va recuperato da `result_override`, popolato in `_load_game_from_db()` confrontando `row.result` con l'esito deducibile da `_check_game_over(board)`: se differiscono (o quest'ultimo è `None`), l'esito persistito vince. Coperto da `test_flagged_result_survives_cache_miss`.
+- **Risposta API.** `time_control`/`clock` sono **sempre presenti** nel body di `board_to_state` — mai chiavi assenti. Per una partita non a tempo: `time_control: null`, ma `clock: {"white": null, "black": null}` (non `null` a livello top, per struttura sempre valorizzata anche vuota — scelta di design della prima bozza, mantenuta invece di rifattorizzare per zero guadagno pratico; il frontend gestisce entrambe le forme controllando `time_control`).
+- **Frontend** (`frontend/index.html`, nessun file nuovo): due box `.clock-box` fissi sopra/sotto la board (avversario sempre in alto, player sempre in basso — indipendente dalla rotazione per il nero, a differenza dell'orientamento dei pezzi). Selettore preset nel modal impostazioni (`.time-row`, stesso linguaggio visivo di `.side-row`). Countdown **previsionale** client-side (`setInterval` 250ms) che decrementa solo il lato al tratto (`state.turn`), sempre riconciliato col valore autoritativo del server a ogni risposta (`clockReconcile()`, chiamata da `updateState()`) — **nessun polling/websocket in questa fase** (quello arriva con l'item successivo di Fase 6): se il countdown locale tocca 0 senza che parta una nuova richiesta, resta fermo finché la prossima risposta non conferma la bandierina. Soglia "tempo basso" (classe `.low`, rosso pulsante) sotto i 10s. Bandierina → stesso flusso game-over esistente (`data.game_over`/suono `gameover`/banner), solo una nuova voce nella mappa `reasons` (`timeout: 'Tempo scaduto'`) — nessuna logica nuova lato UI di game-over.
+- **Verifica.** Backend: 19 nuovi test in `TestTimeControl` (decremento, incremento, bandierina simmetrica player/engine, persistenza, cache-miss, regressione untimed) — 125/125 nella suite (baseline 106 + 19). Frontend: nessun browser disponibile nel sandbox, stessa tecnica jsdom delle fasi precedenti — `tests/frontend_harness.mjs` esteso con 11 check (selettore preset via click DOM reale, clock live contro un backend vero, countdown client-side dopo un `sleep`, riconciliazione post-mossa, bandierina iniettata via `updateState()` sintetico per non dover aspettare un timeout reale nel harness) — 57/57 check, incluso il resto della suite esistente invariato.
 
 ---
 
@@ -306,7 +319,7 @@ Giugno 2026
 
 Luglio 2026
 ├── Sett. 30 giu  ████  Fase 6 — puzzle trainer (dataset esterno)
-├── Sett. 7 lug   ████  Fase 6 — time control
+├── Sett. 7 lug   ████  Fase 6 — time control  ✅ completato (anticipato)
 └── Sett. 14 lug  ████  Fase 6 — WebSocket
 
 Agosto 2026
