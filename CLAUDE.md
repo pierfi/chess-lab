@@ -253,13 +253,23 @@ Obiettivo: trasformare l'app in un vero trainer con feedback quantitativo sui pr
 
 Obiettivo: funzionalità avanzate per rendere il training più vario e coinvolgente.
 
-| Settimana | Attività | Ore stimate | Modello suggerito |
-|-----------|----------|-------------|-------------------|
-| Sett. 30 giu | Modalità puzzle: FEN custom, mossa corretta unica, feedback immediato | ~4 ore | Opus |
-| Sett. 7 lug | Time control: clock digitale, bullet/blitz/rapid, Fischer increment | ~3 ore | Sonnet |
-| Sett. 14 lug | WebSocket: aggiornamenti live, supporto multi-tab | ~3 ore | Opus |
+| Settimana | Attività | Ore stimate | Modello suggerito | Stato |
+|-----------|----------|-------------|-------------------|-------|
+| Sett. 30 giu | Modalità puzzle: FEN custom, mossa corretta unica, feedback immediato | ~4 ore | Opus | 🔲 |
+| Sett. 7 lug | Time control: clock digitale, bullet/blitz/rapid, Fischer increment | ~3 ore | Sonnet | 🔲 |
+| Sett. 14 lug | WebSocket: aggiornamenti live, supporto multi-tab | ~3 ore | Opus | ✅ fatto (18 lug 2026, branch `feature/websocket-live`) |
 
 **Nota:** il dataset Lichess puzzles (CSV ~50 MB) richiede un import script separato e uno schema dedicato. Valutare se incluso in Fase 6 o posticipato. Puzzle da dataset esterno, distinti dai puzzle self-generated di Fase 4.
+
+#### WebSocket — aggiornamenti live & multi-tab (implementato 18 luglio 2026)
+
+Canale WS di **sola notifica** di cambio stato: se la stessa `game_id` è aperta in più tab, una mossa in una tab fa rifetchare le altre via REST — non un pub/sub generico, non stato-sul-filo. Spec autoritativa: [`docs/websocket-live.md`](docs/websocket-live.md). Dettagli non ovvi:
+
+- **Ponte thread→event-loop (il nodo tecnico).** Gli endpoint sono `def` sincroni nel threadpool, ma le connessioni WS vivono sull'event loop asyncio: un worker thread **non** può toccare il socket né una `asyncio.Queue`. Il ponte è `loop.call_soon_threadsafe` — l'unica API asyncio cross-thread. `GameConnectionManager.notify()` (chiamata dal worker sync dopo che `make_move` ha finito di mutare la board) schedula sul loop il `put_nowait` in una **coda per-connessione**, drenata da un **task "pump"** dedicato che è l'unico a fare `send_json` (nessuna send concorrente sullo stesso socket). Il loop è catturato **pigramente alla prima connessione** (`asyncio.get_running_loop()` nell'handler WS), non nel `lifespan` — i test usano `TestClient(app)` senza `with`, quindi il lifespan non parte. **Nessun engine Stockfish coinvolto**, vincolo ferreo rispettato.
+- **`WS /ws/game/{game_id}`** — unidirezionale server→client, nessuna validazione di esistenza (canale di notifica, non accesso ai dati). Messaggi: `{type:"state", game_id, ply, is_game_over}` e `{type:"deleted", game_id}`. `ply` = mosse totali, per il **dedup** lato client.
+- **Siti di notifica**: `POST /game/move` (una notifica a fine chiamata, copre mossa player + risposta engine + eventuale game-over) e `DELETE /game/{id}`. `/game/new`/import/drill creano una `game_id` nuova (nessun subscriber ancora) → non instrumentati. `/game/analyze` non muta la board → fuori scope. **Contratti REST esistenti invariati** (il WS è additivo).
+- **Frontend** (`index.html`, single-file): `WS_API` derivata da `API` (`http→ws`). `connectGameSocket(gameId)` alla nuova partita e al drill di finali; `onmessage` `state` → refetch `GET /game/{id}` → `updateState` (pipeline di re-render esistente, la **fonte di verità resta REST**). Dedup dell'eco della propria mossa: ignora se la tab sta giocando (`state.thinking`) o se `ply <= moveHistory.length`. Riconnessione best-effort con backoff se il socket cade a partita aperta; degradazione pulita se il WS non si connette (app identica a prima).
+- **Verifica**: suite pytest 106 → **111 test verdi** (5 nuovi, incl. multi-tab/deleted/isolamento via `TestClient`); verifica **live sotto uvicorn reale** con client `websockets` raw (il `TestClient` esegue i WS in modo sincrono e maschererebbe un problema del ponte thread→loop) — due socket raw ricevono la notifica di una mossa fatta da un thread separato; harness jsdom con `WebSocket` mock per la logica del client frontend (jsdom non implementa `WebSocket`). Dettagli in `docs/websocket-live.md`.
 
 ---
 

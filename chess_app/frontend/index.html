@@ -1167,6 +1167,8 @@ body {
 
 <script>
 const API = 'http://localhost:8765';
+// WebSocket per le notifiche live (Fase 6): http→ws, https→wss.
+const WS_API = API.replace(/^http/, 'ws');
 
 let state = {
   gameId: null,
@@ -1889,6 +1891,76 @@ function updateState(data) {
   fetchThreats();
 }
 
+// ---------- WebSocket: notifiche live & multi-tab (Fase 6) ----------
+//
+// Canale di SOLA notifica: il socket segnala che lo stato della partita è
+// cambiato, ma i dati arrivano sempre da REST (GET /game/{id} → updateState).
+// Se la stessa partita è aperta in più tab, una mossa in una tab fa rifetchare
+// le altre. Degradazione pulita: se il WS non si connette (backend vecchio,
+// proxy senza upgrade) l'app funziona esattamente come prima. Spec di design:
+// docs/websocket-live.md.
+let gameSocket = null;          // WebSocket attiva (o null)
+let gameSocketGameId = null;    // game_id per cui vogliamo restare connessi
+let wsReconnectTimer = null;
+
+function connectGameSocket(gameId) {
+  // Chiude l'eventuale socket precedente e ne apre uno nuovo sulla partita
+  // appena diventata attiva nella vista Gioca.
+  disconnectGameSocket();
+  gameSocketGameId = gameId;
+  openGameSocket();
+}
+
+function disconnectGameSocket() {
+  gameSocketGameId = null;
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if (gameSocket) {
+    const ws = gameSocket;
+    gameSocket = null;          // azzero prima: onclose non deve riconnettere
+    try { ws.close(); } catch (e) { /* ignore */ }
+  }
+}
+
+function openGameSocket() {
+  const gameId = gameSocketGameId;
+  if (!gameId) return;
+  let ws;
+  try {
+    ws = new WebSocket(WS_API + '/ws/game/' + gameId);
+  } catch (e) {
+    return;  // WebSocket non disponibile: nessuna notifica live, l'app resta usabile
+  }
+  gameSocket = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (!msg || msg.game_id !== state.gameId) return;
+    if (msg.type === 'deleted') {
+      setStatus('Questa partita è stata cancellata in un\'altra scheda.');
+      return;
+    }
+    if (msg.type !== 'state') return;
+    // Dedup dell'eco della propria mossa: se questa tab sta giocando (thinking),
+    // aggiornerà lo stato da sé — ignoro la notifica. Le altre tab (thinking
+    // false) rifetchano solo se il ply notificato supera quello già applicato.
+    if (state.thinking) return;
+    if (msg.ply <= state.moveHistory.length) return;
+    fetch(API + '/game/' + msg.game_id)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d && state.gameId === d.game_id) updateState(d); })
+      .catch(() => { /* rete assente: si riproverà alla prossima notifica */ });
+  };
+  ws.onclose = () => {
+    // Riconnessione best-effort solo se questo è ancora il socket attivo e la
+    // partita è ancora aperta (una chiusura volontaria azzera gameSocket prima).
+    if (gameSocket === ws && gameSocketGameId === gameId) {
+      gameSocket = null;
+      wsReconnectTimer = setTimeout(openGameSocket, 1500);
+    }
+  };
+  ws.onerror = () => { /* la chiusura è gestita da onclose */ };
+}
+
 // ---------- Export PGN ----------
 
 function updateExportButton() {
@@ -2065,6 +2137,7 @@ async function startGame() {
     });
     const data = await r.json();
     state.gameId = data.game_id;
+    connectGameSocket(data.game_id);
     playSound('move');
     updateState(data);
   } catch (e) {
@@ -3019,6 +3092,7 @@ async function startEndgameDrill(drill) {
     state.gameId = data.game_id;
     state.playerColor = data.player_color;
     state.engineElo = data.engine_elo;
+    connectGameSocket(data.game_id);
     playSound('move');
     updateState(data);
     // Sovrascrive il "Tocca a te" di updateState con l'obiettivo del drill;

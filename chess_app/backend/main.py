@@ -1,8 +1,10 @@
 """Chess Lab — FastAPI backend per giocare e analizzare partite contro Stockfish."""
 
+import asyncio
 import io
 import math
 import random
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -11,7 +13,7 @@ from datetime import date, datetime, timedelta
 import chess
 import chess.engine
 import chess.pgn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
@@ -83,6 +85,69 @@ def elo_to_skill_depth(elo: int) -> tuple[int, int]:
     return 20, 20
 
 games: dict[str, dict] = {}
+
+
+# --- WebSocket: notifiche live di cambio stato (Fase 6) --------------------
+#
+# Canale di sola notifica: quando lo stato osservabile di una partita cambia
+# (mossa, game-over, cancellazione), ogni tab con quella game_id aperta riceve
+# un segnale e rifetcha via REST. Il socket NON trasporta lo stato di gioco —
+# la fonte di verità resta REST. Nessun engine coinvolto. Spec di design
+# autoritativa: docs/websocket-live.md.
+#
+# Nodo tecnico: gli endpoint sono `def` sincroni (worker thread del threadpool),
+# mentre le connessioni WS vivono nell'event loop asyncio. Un worker thread non
+# può toccare il socket né una asyncio.Queue direttamente. Il ponte è
+# `loop.call_soon_threadsafe`: notify() (chiamata dal worker sync) schedula sul
+# loop il `put_nowait` in una coda per-connessione, drenata da un task "pump"
+# dedicato che è l'unico a fare `send_json` (nessuna send concorrente).
+class GameConnectionManager:
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._lock = threading.Lock()
+        self._queues: dict[str, set[asyncio.Queue]] = {}
+
+    def register(self, game_id: str, queue: "asyncio.Queue") -> None:
+        # Loop catturato pigramente alla prima connessione: l'handler ws gira
+        # sul loop. Non basta il lifespan (i test usano TestClient(app) senza
+        # `with`, quindi il lifespan non parte — vedi conftest.py).
+        self._loop = asyncio.get_running_loop()
+        with self._lock:
+            self._queues.setdefault(game_id, set()).add(queue)
+
+    def unregister(self, game_id: str, queue: "asyncio.Queue") -> None:
+        with self._lock:
+            conns = self._queues.get(game_id)
+            if conns is not None:
+                conns.discard(queue)
+                if not conns:
+                    self._queues.pop(game_id, None)
+
+    def notify(self, game_id: str, message: dict) -> None:
+        # Chiamabile da un worker thread sync. No-op se nessuno ascolta o se il
+        # loop non è ancora stato catturato (nessuna connessione mai aperta).
+        loop = self._loop
+        if loop is None:
+            return
+        with self._lock:
+            queues = list(self._queues.get(game_id, ()))
+        for queue in queues:
+            loop.call_soon_threadsafe(queue.put_nowait, message)
+
+
+ws_manager = GameConnectionManager()
+
+
+def _notify_state(game_id: str, game: dict) -> None:
+    """Notifica alle tab collegate che lo stato della partita è cambiato. `ply`
+    (mosse totali) permette al client di scartare l'eco della propria mossa e i
+    messaggi stantii — vedi docs/websocket-live.md."""
+    ws_manager.notify(game_id, {
+        "type": "state",
+        "game_id": game_id,
+        "ply": len(game["move_objects"]),
+        "is_game_over": game["board"].is_game_over(),
+    })
 
 class NewGameRequest(BaseModel):
     player_color: str = Field(pattern=r"^(white|black)$")
@@ -714,6 +779,7 @@ def make_move(req: MoveRequest):
         state = _board_to_state(req.game_id, game)
         state["game_over"] = over
         game["last_ready_at"] = time.monotonic()
+        _notify_state(req.game_id, game)
         return state
 
     # Mossa Stockfish (think_ms = wall-time reale della ricerca, no padding)
@@ -739,12 +805,44 @@ def make_move(req: MoveRequest):
     if over:
         state["game_over"] = over
     game["last_ready_at"] = time.monotonic()
+    _notify_state(req.game_id, game)
     return state
 
 @app.get("/game/{game_id}")
 def get_game(game_id: str):
     game = _get_game(game_id)
     return _board_to_state(game_id, game)
+
+@app.websocket("/ws/game/{game_id}")
+async def game_ws(websocket: WebSocket, game_id: str):
+    """Canale di notifica live per una partita (Fase 6). Unidirezionale
+    server→client: invia solo eventi "stato cambiato"/"cancellata", il client
+    rifetcha via REST. Nessuna validazione della game_id (canale di sola
+    notifica): una game_id inesistente semplicemente non riceve nulla."""
+    await websocket.accept()
+    queue: asyncio.Queue = asyncio.Queue()
+    ws_manager.register(game_id, queue)
+
+    async def _pump():
+        # Unico mittente sul socket: nessuna send concorrente.
+        try:
+            while True:
+                message = await queue.get()
+                await websocket.send_json(message)
+        except (WebSocketDisconnect, RuntimeError):
+            pass  # socket chiuso: il finally esterno deregistra
+
+    pump = asyncio.create_task(_pump())
+    try:
+        # Il client non invia nulla di applicativo: leggiamo solo per rilevare
+        # la disconnessione (receive_text alza WebSocketDisconnect alla chiusura).
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        pump.cancel()
+        ws_manager.unregister(game_id, queue)
 
 @app.post("/game/{game_id}/hint")
 def game_hint(game_id: str, req: HintRequest):
@@ -1082,6 +1180,7 @@ def delete_game(game_id: str):
             raise HTTPException(status_code=404, detail="Game not found")
         db.delete(row)
     games.pop(game_id, None)
+    ws_manager.notify(game_id, {"type": "deleted", "game_id": game_id})
     return {"deleted": True, "game_id": game_id}
 
 @app.post("/games/import")

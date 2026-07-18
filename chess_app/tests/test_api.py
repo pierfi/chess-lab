@@ -1667,3 +1667,62 @@ class TestAnalyzeStartFen:
         assert ply1["color"] == "white"
         assert ply1["move_number"] == 1
         assert ply1["move_uci"] == "e2e4"
+
+
+class TestWebSocketLive:
+    """Fase 6 — notifiche live di cambio stato via WebSocket (docs/websocket-live.md)."""
+
+    def test_move_notifies_connected_socket(self, client, white_game):
+        gid = white_game["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid}") as ws:
+            r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+            assert r.status_code == 200
+            msg = ws.receive_json()
+            assert msg["type"] == "state"
+            assert msg["game_id"] == gid
+            # player + eventuale risposta engine → ply già consolidato
+            assert msg["ply"] == len(r.json()["move_history"])
+            assert msg["ply"] >= 1
+
+    def test_multi_tab_both_receive(self, client, white_game):
+        """Due connessioni indipendenti sulla stessa game_id: entrambe ricevono
+        la notifica di una singola mossa (il caso multi-tab della roadmap)."""
+        gid = white_game["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid}") as ws1, \
+             client.websocket_connect(f"/ws/game/{gid}") as ws2:
+            r = client.post("/game/move", json={"game_id": gid, "move_uci": "d2d4"})
+            assert r.status_code == 200
+            m1 = ws1.receive_json()
+            m2 = ws2.receive_json()
+            for m in (m1, m2):
+                assert m["type"] == "state"
+                assert m["game_id"] == gid
+
+    def test_isolation_per_game_id(self, client):
+        """Una connessione su A non riceve gli eventi di B: la prima notifica
+        vista dalla socket di A è quella di A, non quella (precedente) di B."""
+        a = client.post("/game/new", json={"player_color": "white", "engine_elo": 800}).json()
+        b = client.post("/game/new", json={"player_color": "white", "engine_elo": 800}).json()
+        gid_a, gid_b = a["game_id"], b["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid_a}") as ws_a:
+            # Muovo prima su B (nessun subscriber di B), poi su A.
+            assert client.post("/game/move", json={"game_id": gid_b, "move_uci": "e2e4"}).status_code == 200
+            assert client.post("/game/move", json={"game_id": gid_a, "move_uci": "e2e4"}).status_code == 200
+            msg = ws_a.receive_json()
+            assert msg["type"] == "state"
+            assert msg["game_id"] == gid_a
+
+    def test_delete_notifies(self, client, white_game):
+        gid = white_game["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid}") as ws:
+            r = client.delete(f"/game/{gid}")
+            assert r.status_code == 200
+            msg = ws.receive_json()
+            assert msg["type"] == "deleted"
+            assert msg["game_id"] == gid
+
+    def test_connect_unknown_game_id_ok(self, client):
+        """Il socket è un canale di sola notifica: una game_id inesistente si
+        connette senza errore (non riceverà mai nulla)."""
+        with client.websocket_connect("/ws/game/deadbeef") as ws:
+            assert ws is not None
