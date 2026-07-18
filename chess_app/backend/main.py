@@ -31,6 +31,7 @@ try:
         session_scope,
         utcnow,
     )
+    from backend.eco_book import match_opening
 except ModuleNotFoundError:  # pragma: no cover - solo per uvicorn da backend/
     from db import (
         AnalysisResult,
@@ -43,6 +44,7 @@ except ModuleNotFoundError:  # pragma: no cover - solo per uvicorn da backend/
         session_scope,
         utcnow,
     )
+    from eco_book import match_opening
 
 
 @asynccontextmanager
@@ -198,6 +200,15 @@ def _build_pgn(game: dict) -> str:
         node = node.add_variation(move)
     return str(pgn_game)
 
+def _current_opening(game: dict, move_history_uci: list[str]) -> dict | None:
+    """Apertura ECO corrente via longest-prefix match (Fase 5). Il book è
+    costruito sulla posizione di partenza standard: una start_fen custom (drill
+    di finali) non ha alcun senso da matchare, quindi niente lookup in quel
+    caso."""
+    if game.get("start_fen"):
+        return None
+    return match_opening(move_history_uci)
+
 def _board_to_state(game_id: str, game: dict) -> dict:
     board = game["board"]
 
@@ -211,6 +222,8 @@ def _board_to_state(game_id: str, game: dict) -> dict:
         san_history.append(replay_board.san(m))
         replay_board.push(m)
 
+    move_history_uci = [m.uci() for m in game["move_objects"]]
+
     return {
         "game_id": game_id,
         "fen": board.fen(),
@@ -220,10 +233,11 @@ def _board_to_state(game_id: str, game: dict) -> dict:
         "is_game_over": board.is_game_over(),
         "result": result,
         "last_engine_move": game["last_engine_move"],
-        "move_history": [m.uci() for m in game["move_objects"]],
+        "move_history": move_history_uci,
         "move_history_san": san_history,
         "player_color": game["player_color"],
         "engine_elo": game["engine_elo"],
+        "opening": _current_opening(game, move_history_uci),
     }
 
 def _engine_move(board: chess.Board, elo: int) -> tuple[chess.Move, float]:
@@ -1068,7 +1082,8 @@ def game_replay(game_id: str):
         fens = [m.fen_before for m in move_rows]
 
     fens.append(game["board"].fen())
-    return {"fens": fens, "moves": moves, "pgn": _build_pgn(game)}
+    opening = _current_opening(game, [m["uci"] for m in moves])
+    return {"fens": fens, "moves": moves, "pgn": _build_pgn(game), "opening": opening}
 
 @app.delete("/game/{game_id}")
 def delete_game(game_id: str):

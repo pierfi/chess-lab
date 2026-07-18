@@ -124,6 +124,111 @@ class TestGetGame:
 
 
 # -------------------------------------------------------------------
+# Identificazione apertura ECO (Fase 5) — longest-prefix match, iniettata
+# direttamente in games[] per avere una sequenza di mosse deterministica
+# (Stockfish a bassa forza non garantisce di restare "a libro").
+# -------------------------------------------------------------------
+def _inject_game(gid: str, uci_moves: list[str], player_color: str = "white", start_fen: str | None = None):
+    board = chess.Board(start_fen) if start_fen else chess.Board()
+    move_objects = []
+    for uci in uci_moves:
+        mv = chess.Move.from_uci(uci)
+        move_objects.append(mv)
+        board.push(mv)
+    games[gid] = {
+        "board": board,
+        "player_color": player_color,
+        "engine_elo": 800,
+        "move_objects": move_objects,
+        "last_engine_move": uci_moves[-1] if uci_moves else None,
+        "created_at": "2026.07.18",
+        "start_fen": start_fen,
+    }
+
+
+class TestOpening:
+    def test_no_moves_no_opening(self, client, white_game):
+        r = client.get(f"/game/{white_game['game_id']}")
+        assert r.status_code == 200
+        assert r.json()["opening"] is None
+
+    def test_single_move_matches(self, client):
+        _inject_game("eco1", ["e2e4"])
+        r = client.get("/game/eco1")
+        assert r.status_code == 200
+        opening = r.json()["opening"]
+        assert opening == {"eco": "B00", "name": "King's Pawn Game"}
+
+    def test_updates_ply_by_ply(self, client):
+        # 1.e4 -> King's Pawn Game (B00)
+        _inject_game("eco2a", ["e2e4"])
+        assert client.get("/game/eco2a").json()["opening"] == {"eco": "B00", "name": "King's Pawn Game"}
+
+        # 1.e4 c5 -> Sicilian Defense (B20)
+        _inject_game("eco2b", ["e2e4", "c7c5"])
+        assert client.get("/game/eco2b").json()["opening"] == {"eco": "B20", "name": "Sicilian Defense"}
+
+        # 1.e4 c5 2.Nf3 -> ancora Sicilian Defense, ma riga più lunga (B27)
+        _inject_game("eco2c", ["e2e4", "c7c5", "g1f3"])
+        assert client.get("/game/eco2c").json()["opening"] == {"eco": "B27", "name": "Sicilian Defense"}
+
+    def test_well_known_lines(self, client):
+        # Ruy Lopez
+        _inject_game("eco3a", ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5"])
+        opening = client.get("/game/eco3a").json()["opening"]
+        assert opening["eco"] == "C60"
+        assert opening["name"] == "Ruy Lopez"
+
+        # Italian Game: Giuoco Piano
+        _inject_game("eco3b", ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5"])
+        opening = client.get("/game/eco3b").json()["opening"]
+        assert opening["eco"] == "C50"
+        assert "Italian Game" in opening["name"]
+
+    def test_unknown_sequence_is_null(self, client):
+        # a2a3 non è tra le prime mosse presenti nel book (verificato contro
+        # data/eco.json) — nessun prefisso può matchare.
+        _inject_game("eco4", ["a2a3", "a7a6"])
+        r = client.get("/game/eco4")
+        assert r.status_code == 200
+        assert r.json()["opening"] is None
+
+    def test_divergence_falls_back_to_shorter_match(self, client):
+        # 1.e4 c5 è nel book (Sicilian Defense), ma la terza mossa qui (2.e5?!,
+        # verificato assente da ogni riga che inizia con e4 c5 nel dataset) non
+        # è una continuazione nota: deve restare l'ultimo prefisso che matcha,
+        # non tornare a null.
+        _inject_game("eco5", ["e2e4", "c7c5", "e4e5"])
+        opening = client.get("/game/eco5").json()["opening"]
+        assert opening == {"eco": "B20", "name": "Sicilian Defense"}
+
+    def test_custom_start_fen_never_matches(self, client):
+        # Un drill di finali (start_fen custom) non ha senso da matchare contro
+        # un book costruito sulla posizione standard, anche se la board risulta
+        # per puro caso identica a una riga nota.
+        _inject_game("eco6", ["e2e4"], start_fen=chess.Board().fen())
+        opening = client.get("/game/eco6").json()["opening"]
+        assert opening is None
+
+    def test_opening_wired_into_move_and_new_game(self, client, white_game):
+        # /game/new: nessuna mossa ancora, opening None (già coperto sopra),
+        # /game/move deve aggiornare il campo dopo la mossa del player.
+        gid = white_game["game_id"]
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+        assert "opening" in r.json()
+
+    def test_opening_in_replay(self, client):
+        _inject_game("eco7", ["e2e4", "c7c5"])
+        # /game/{id}/replay legge le mosse dalla tabella `moves` nel DB, non
+        # dalla cache: per una partita solo-cache come questa la lista risulta
+        # vuota, quindi qui si verifica solo la presenza del campo nello shape.
+        r = client.get("/game/eco7/replay")
+        assert r.status_code == 200
+        assert "opening" in r.json()
+
+
+# -------------------------------------------------------------------
 # /game/analyze
 # -------------------------------------------------------------------
 class TestAnalyze:
