@@ -242,9 +242,11 @@ Obiettivo: trasformare l'app in un vero trainer con feedback quantitativo sui pr
 | Settimana | Attività | Ore stimate | Modello suggerito |
 |-----------|----------|-------------|-------------------|
 | Sett. 9 giu | ✅ Grafico eval: curva centipawn, highlight blunders, click → jump mossa — **anticipato, completato l'11 luglio 2026** su `feature/analysis-panel-v2` insieme al restyling a due colonne del pannello analisi (vedi [docs/improvements.md](docs/improvements.md)) | ~3 ore | Opus |
-| Sett. 16 giu | Identificazione apertura ECO live (eco.json locale, ~500 aperture) | ~2.5 ore | Sonnet |
+| Sett. 16 giu | ✅ Identificazione apertura ECO live (eco.json locale) — **completato 18 luglio 2026** su `feature/eco-openings` | ~2.5 ore | Sonnet |
 | Sett. 23 giu | Statistiche personali: accuracy storica, errori frequenti, ELO simulato | ~3 ore | Opus |
 | Sett. 23 giu | Dashboard riepilogo (ultimi 10 match, trend accuracy) | ~1.5 ore | Sonnet |
+
+**Nota (aperture ECO, 18 luglio 2026):** dataset curato in `backend/data/eco.json` (822 righe: eco, name, uci, san), 822/822 validate programmaticamente contro `python-chess` (ogni SAN si riparsa nell'UCI atteso, nessun duplicato di chiave) — copertura più ampia della stima iniziale "~500" di roadmap. `backend/eco_book.py` espone `match_opening(move_history_uci)`: longest-prefix match puro in memoria (book caricato una volta all'import, nessuna dipendenza dal DB). Wired come campo `"opening"` (`{"eco", "name"} | null`) in `_board_to_state` — quindi su `POST /game/new`, `POST /game/move`, `GET /game/{id}`, `POST /games/import`, `POST /training/endgames/{id}/start` — e su `GET /game/{id}/replay`. Una `start_fen` custom (drill di finali) non viene mai matchata: il book è costruito sulla posizione standard, matchare una posizione arbitraria non avrebbe senso, quindi `_current_opening()` ritorna `null` a prescindere dalle mosse se `game["start_fen"]` è valorizzato. Frontend: badge ECO+nome (`#opening-display`) sopra la move-list nella vista Gioca, aggiornato ad ogni `updateState()`, nascosto quando fuori libro. 9 nuovi test pytest (`TestOpening` in `tests/test_api.py`: match a mossa singola, aggiornamento ply-per-ply, righe note — Ruy Lopez/Italiana/Siciliana —, sequenza fuori libro → null, fallback al prefisso più lungo dopo la divergenza, nessun match con `start_fen` custom) — 115/115 nella suite. Verifica frontend via lo stesso harness jsdom delle fasi precedenti (`tests/frontend_harness.mjs`), estesa con controlli sul wiring end-to-end e sul rendering del badge — 45/45 check.
 
 ---
 
@@ -255,11 +257,28 @@ Obiettivo: funzionalità avanzate per rendere il training più vario e coinvolge
 
 | Settimana | Attività | Ore stimate | Modello suggerito | Stato |
 |-----------|----------|-------------|-------------------|-------|
-| Sett. 30 giu | Modalità puzzle: FEN custom, mossa corretta unica, feedback immediato | ~4 ore | Opus | 🔲 |
+| Sett. 30 giu | Modalità puzzle: FEN custom, mossa corretta unica, feedback immediato | ~4 ore | Opus | ✅ fatto (18 luglio 2026, branch `feature/puzzle-mode-external` — vedi sotto) |
 | Sett. 7 lug | Time control: clock digitale, bullet/blitz/rapid, Fischer increment | ~3 ore | Sonnet | 🔲 |
-| Sett. 14 lug | WebSocket: aggiornamenti live, supporto multi-tab | ~3 ore | Opus | ✅ fatto (18 lug 2026, branch `feature/websocket-live`) |
+| Sett. 14 lug | WebSocket: aggiornamenti live, supporto multi-tab | ~3 ore | Opus | ✅ fatto (18 lug 2026, branch `feature/websocket-live` — vedi sotto) |
 
-**Nota:** il dataset Lichess puzzles (CSV ~50 MB) richiede un import script separato e uno schema dedicato. Valutare se incluso in Fase 6 o posticipato. Puzzle da dataset esterno, distinti dai puzzle self-generated di Fase 4.
+**Nota:** il dataset Lichess puzzles (CSV ~50 MB) richiede un import script separato e uno schema dedicato. Valutare se incluso in Fase 6 o posticipato. Puzzle da dataset esterno, distinti dai puzzle self-generated di Fase 4. → **Risolto** con un bundle statico curato (vedi sotto): niente import del CSV completo, nessuno schema di import incrementale.
+
+#### Modalità puzzle (dataset Lichess esterno) — implementata 18 luglio 2026
+
+Trainer tattico su posizioni **generiche** dal Lichess puzzle database — sistema DISTINTO dai puzzle self-generated di Fase 4 (`/training/puzzles`, tabelle `puzzles`/`srs_cards`), che resta intoccato: nessuna FK verso `games`, nessuna carta SRS, nessuna scrittura DB durante la risoluzione.
+
+**Sourcing dei dati — bundle statico curato, non il CSV completo.** Il dataset ufficiale (`lichess_db_puzzle.csv.zst`, ~300 MB compressi, milioni di puzzle, licenza CC0) è sproporzionato per un'app locale single-user. `scripts/build_puzzle_bundle.py` (one-off, richiede rete + `zstandard`, NON in requirements.txt) scarica una slice iniziale del file reale via HTTP Range (~12 MB), la decomprime parzialmente, filtra per qualità (Popularity ≥ 90, NbPlays ≥ 500, RatingDeviation ≤ 100, linee ≤ 4 mosse del solutore), **valida ogni puzzle con python-chess** (FEN + legalità dell'intera linea) e campiona ~400 puzzle stratificati per fascia di rating (120 <1200, 120 1200–1599, 100 1600–1999, 60 2000+; seed fisso, build riproducibile a parità di slice). Output: `backend/data/lichess_puzzles.json` (~100 KB, versionato — provenienza e licenza in `backend/data/NOTICE.md`). A runtime l'app **non tocca mai la rete** — stesso precedente di `ENDGAME_DRILLS`. In fase di build la mossa di setup Lichess (prima mossa del campo `Moves`) viene già applicata alla FEN: nel bundle `fen` è la posizione col solutore al tratto, `initial_uci` è la mossa avversaria che l'ha generata (highlight UI) e `moves` è la sola linea di soluzione (solutore per primo, lunghezza dispari).
+
+**Schema** — tabella `external_puzzles` (migration Alembic `c41e8d5a2f90`, `create_table` puro: batch mode non necessario, nessun ALTER): `id` TEXT PK (PuzzleId Lichess), `fen`, `initial_uci`, `moves_uci` (linea spazio-separata), `rating` INT indicizzato, `themes` (spazio-separati), `lichess_url` NULL. Seed idempotente dal bundle in `db.seed_external_puzzles()` (chiamato dal lifespan e da conftest): popola solo se la tabella è vuota — per aggiornare il bundle si rigenera il JSON e si riparte da una tabella senza righe.
+
+**Endpoint** (in `main.py`, sezione "Fase 6"):
+- `GET /puzzles/next?theme=&min_rating=&max_rating=&exclude=` — puzzle casuale (ORDER BY RANDOM(), ~400 righe: costo irrilevante) filtrabile per tema (match a parola intera su `themes`, non substring) e fascia rating; `exclude` (ultimo id mostrato) evita la ripetizione immediata, **best-effort**: se l'unico match è quello escluso viene riproposto invece di rispondere "nessun puzzle". La shape pubblica **non espone mai la soluzione** — solo `solution_moves` (numero di mosse del solutore) per il progresso UI. Nessun match → `{"puzzle_id": null, "message": ...}`.
+- `GET /puzzles/themes` — temi disponibili con conteggio (aggregazione in Python), per la select del frontend.
+- `POST /puzzles/{id}/answer` `{move_index, move_uci}` — validazione **stateless**: il server ricostruisce la posizione da FEN + prefisso di soluzione (nessuno stato di sessione, nessuna scrittura DB). `move_index` è 0-based sulla linea, solo indici pari (le dispari sono le risposte avversarie auto-giocate); 400 se dispari/oltre linea/UCI malformato/mossa illegale, 404 se id inesistente. **Regola Lichess**: un matto immediato alternativo alla mossa attesa è comunque corretto (`solved_by_alternate_mate`) e completa il puzzle. Mossa giusta a linea non finita → la risposta include la contromossa (`reply_uci`/`reply_san`) e `next_fen` già con entrambe applicate (il client non applica mai mosse a una FEN da solo) + `next_move_index`. Mossa sbagliata → puzzle fallito, `expected_uci` sempre presente per mostrare la soluzione del passo.
+
+**Frontend** — quinta tab "Puzzle" (Gioca / Allenamento / **Puzzle** / Storico / Crescita), stesso pattern `showView()`, tutto nel singolo `index.html`. Stato dedicato `ext` (separato sia da `state` sia da `training`); board col renderer condiviso `buildBoardEl()` orientata su `player_to_move`, highlight della mossa avversaria di setup, interazione click-click identica alla partita live (riusa `generateMoveCandidates`/`askPromotion`). Filtri tema (select popolata da `/puzzles/themes`, etichette italiane in `EXT_THEME_LABEL`, solo temi con ≥8 puzzle) e difficoltà (4 fasce); progresso "mossa N di M" sulle linee multi-mossa, riepilogo SAN della linea giocata, punteggio di sessione (in memoria, non persistito). Fallimento → board sulla posizione dell'errore con la mossa attesa evidenziata; rientrare nella vista NON abbandona un puzzle in corso; cambiare filtro sì (non conta come tentato). Nota testuale in vista che rimanda i puzzle "dalle tue partite" alla tab Allenamento — le due funzionalità convivono senza confondersi.
+
+**Verifica** — 17 nuovi test pytest (123/123 verdi); harness jsdom (`tests/frontend_harness.mjs`, esteso con la sezione puzzle: risoluzione dell'intera linea leggendo la soluzione dal bundle — mai dall'API — exclude, fail path, select temi) contro backend isolato.
 
 #### WebSocket — aggiornamenti live & multi-tab (implementato 18 luglio 2026)
 
@@ -311,8 +330,8 @@ Maggio 2026
 Giugno 2026
 ├── Sett. 2 giu   ████  Fase 4 — frontend pannello Allenamento  ✅ completato
 ├── Sett. 9 giu   ████  Fase 5 — eval chart  ✅ completato (anticipato)
-├── Sett. 16 giu  ████  Fase 5 — aperture ECO  ← prossimo
-└── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard
+├── Sett. 16 giu  ████  Fase 5 — aperture ECO  ✅ completato
+└── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard  ← prossimo
 
 Luglio 2026
 ├── Sett. 30 giu  ████  Fase 6 — puzzle trainer (dataset esterno)
@@ -386,9 +405,15 @@ loss <  -10  → excellent
   "last_engine_move": "e7e5" | null,
   "move_history": ["e2e4", "e7e5", ...],
   "player_color": "white"|"black",
-  "engine_elo": 1000
+  "engine_elo": 1000,
+  "opening": {"eco": "C60", "name": "Ruy Lopez"} | null
 }
 ```
+`opening` (Fase 5, `backend/eco_book.py`): longest-prefix match della cronologia mosse
+contro `backend/data/eco.json` (822 righe curate). `null` se la posizione è già fuori
+libro o se la partita parte da uno `start_fen` custom (drill di finali — il book è
+costruito sulla posizione standard, non ha senso matchare un FEN arbitrario). Presente
+anche su `GET /game/{id}/replay`.
 
 **Risposta tipo `/game/analyze`:**
 ```json

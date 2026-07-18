@@ -17,6 +17,7 @@ Vincoli di threading (vedi CLAUDE.md):
 - SQLite è single-writer: sufficiente per un singolo utente locale.
 """
 
+import json
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -32,6 +33,8 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    func,
+    select,
     text,
 )
 from sqlalchemy.orm import (
@@ -240,6 +243,36 @@ class SrsCard(Base):
     )
 
 
+class ExternalPuzzle(Base):
+    """Puzzle tattici dal dataset Lichess (Fase 6, "Modalità puzzle") — sistema
+    DISTINTO dai puzzle self-generated di Fase 4 (tabella ``puzzles``): nessuna
+    FK verso games, nessuna carta SRS. Le righe vengono seminate una tantum dal
+    bundle statico ``backend/data/lichess_puzzles.json`` (vedi
+    seed_external_puzzles); l'app non tocca mai la rete a runtime."""
+
+    __tablename__ = "external_puzzles"
+
+    # id = PuzzleId Lichess (5 char alfanumerici oggi; 8 per margine)
+    id: Mapped[str] = mapped_column(String(8), primary_key=True)
+    # Posizione col solutore già al tratto (la mossa di setup Lichess è stata
+    # applicata in fase di build del bundle).
+    fen: Mapped[str] = mapped_column(Text, nullable=False)
+    # Mossa avversaria che ha generato la posizione (highlight sul frontend).
+    initial_uci: Mapped[str] = mapped_column(String(6), nullable=False)
+    # Linea di soluzione UCI spazio-separata: solutore per primo, alternata,
+    # lunghezza dispari (l'ultima mossa è sempre del solutore).
+    moves_uci: Mapped[str] = mapped_column(Text, nullable=False)
+    rating: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # Temi Lichess spazio-separati (es. "fork mateIn2 short").
+    themes: Mapped[str] = mapped_column(Text, nullable=False)
+    lichess_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+PUZZLE_BUNDLE_PATH = os.path.join(
+    os.path.dirname(__file__), "data", "lichess_puzzles.json"
+)
+
+
 @contextmanager
 def session_scope():
     """Sessione-per-unità-di-lavoro: commit in uscita, rollback su errore,
@@ -260,3 +293,31 @@ def init_db() -> None:
     stand-alone senza dover lanciare ``alembic upgrade head`` a mano; Alembic
     resta la via formale per le migration (vedi alembic/). Idempotente."""
     Base.metadata.create_all(bind=engine)
+
+
+def seed_external_puzzles() -> int:
+    """Popola ``external_puzzles`` dal bundle JSON versionato, solo se la
+    tabella è vuota (il bundle è statico: nessun refresh a runtime, per un
+    aggiornamento si rigenera con scripts/build_puzzle_bundle.py e si riparte
+    da un DB senza righe). Idempotente; ritorna il numero di righe presenti."""
+    with session_scope() as session:
+        count = session.execute(
+            select(func.count()).select_from(ExternalPuzzle)
+        ).scalar_one()
+        if count:
+            return count
+        if not os.path.exists(PUZZLE_BUNDLE_PATH):
+            return 0
+        with open(PUZZLE_BUNDLE_PATH) as f:
+            bundle = json.load(f)
+        for p in bundle:
+            session.add(ExternalPuzzle(
+                id=p["id"],
+                fen=p["fen"],
+                initial_uci=p["initial_uci"],
+                moves_uci=" ".join(p["moves"]),
+                rating=p["rating"],
+                themes=" ".join(p["themes"]),
+                lichess_url=p.get("url"),
+            ))
+        return len(bundle)
