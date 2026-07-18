@@ -387,6 +387,24 @@ body {
 
 @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
+.opening-display {
+  display: none;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 4px 2px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+.opening-display.visible { display: flex; }
+.opening-display .opening-eco {
+  font-family: monospace;
+  font-weight: bold;
+  color: var(--accent);
+}
+.opening-display .opening-name { color: var(--text); }
+
 .move-list {
   max-height: 300px;
   min-height: 60px;
@@ -918,6 +936,13 @@ body {
 .puzzle-sub { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; min-height: 16px; }
 .puzzle-actions { display: flex; gap: 8px; }
 
+/* Vista Puzzle (dataset Lichess, Fase 6) */
+.ext-note { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; }
+.ext-line { font-size: 13px; color: var(--text); min-height: 18px; margin-bottom: 10px; font-family: monospace; }
+.ext-score { font-size: 12px; color: var(--text-dim); margin-top: 10px; }
+.ext-rating-tag { font-size: 11px; color: var(--text-dim); border: 1px solid var(--border); border-radius: 8px; padding: 1px 7px; }
+.ext-theme-tag { font-size: 11px; background: rgba(76, 140, 230, 0.12); color: var(--blue); border-radius: 8px; padding: 1px 7px; }
+
 /* Barre debolezze: una sola serie per gruppo (magnitudine), un solo colore,
    identità nel testo della riga, valore sempre in chiaro accanto alla barra */
 .train-bar-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 13px; }
@@ -981,6 +1006,7 @@ body {
   <span class="brand">Chess Lab</span>
   <button data-view="play" class="active" onclick="showView('play')">Gioca</button>
   <button data-view="training" onclick="showView('training')">Allenamento</button>
+  <button data-view="puzzles" onclick="showView('puzzles')">Puzzle</button>
   <button data-view="history" onclick="showView('history')">Storico</button>
   <button data-view="growth" onclick="showView('growth')">Crescita</button>
 </nav>
@@ -1037,6 +1063,7 @@ body {
         <div class="threat-note">Solo pezzi indifesi attaccati &mdash; non cambi sfavorevoli n&eacute; tattiche</div>
       </div>
       <div class="hint-panel" id="hint-panel"></div>
+      <div class="opening-display" id="opening-display"></div>
       <div class="move-list" id="move-list"></div>
     </div>
 
@@ -1184,6 +1211,45 @@ body {
   </div>
 </div>
 
+<!-- Vista Puzzle (Fase 6): trainer tattico dal dataset Lichess (bundle statico).
+     Sistema DISTINTO dai puzzle self-generated della vista Allenamento. -->
+<div class="view" id="view-puzzles" style="display:none">
+  <div class="app">
+    <div class="board-area">
+      <div class="board-container">
+        <div id="ext-board"></div>
+        <div class="status-bar" id="ext-status"></div>
+      </div>
+    </div>
+    <div class="sidebar">
+      <div class="card">
+        <h3>Puzzle tattici</h3>
+        <div class="ext-note">Posizioni dal database aperto Lichess (CC0) &mdash; generiche, non dalle tue partite: quelle sono nella tab Allenamento.</div>
+        <div class="filter-row">
+          <select id="ext-theme" onchange="extFiltersChanged()" title="Filtra per tema tattico">
+            <option value="">Tema: tutti</option>
+          </select>
+          <select id="ext-band" onchange="extFiltersChanged()" title="Filtra per difficolt&agrave; (rating Lichess)">
+            <option value="">Difficolt&agrave;: tutte</option>
+            <option value="0-1199">Facile (&lt;1200)</option>
+            <option value="1200-1599">Media (1200&ndash;1599)</option>
+            <option value="1600-1999">Difficile (1600&ndash;1999)</option>
+            <option value="2000-9999">Esperto (2000+)</option>
+          </select>
+        </div>
+        <div class="puzzle-meta" id="ext-meta"></div>
+        <div class="puzzle-feedback" id="ext-feedback"></div>
+        <div class="puzzle-sub" id="ext-sub"></div>
+        <div class="ext-line" id="ext-line"></div>
+        <div class="puzzle-actions">
+          <button class="btn btn-primary" id="ext-next-btn" onclick="loadExtPuzzle()">Prossimo puzzle</button>
+        </div>
+        <div class="ext-score" id="ext-score"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="setup-overlay">
   <div class="setup-box">
     <button class="modal-close" onclick="closeSetup()">&#10005;</button>
@@ -1235,6 +1301,8 @@ body {
 
 <script>
 const API = 'http://localhost:8765';
+// WebSocket per le notifiche live (Fase 6): http→ws, https→wss.
+const WS_API = API.replace(/^http/, 'ws');
 
 let state = {
   gameId: null,
@@ -1259,6 +1327,7 @@ let state = {
   threats: [],            // caselle dei propri pezzi in presa (da GET /threats)
   timeControl: null,      // {initial_seconds, increment_seconds} | null — da data.time_control
   clock: null,            // {white: ms, black: ms} | null — da data.clock (rimanente al server)
+  opening: null,           // {eco, name} dal backend (longest-prefix match), null se fuori libro
 };
 
 // Pezzi come veri asset SVG (set Cburnett di Lichess, frontend/pieces/*.svg),
@@ -1934,7 +2003,9 @@ function updateState(data) {
   // tempo, un oggetto valorizzato altrimenti — mai un campo assente.
   state.timeControl = data.time_control || null;
   state.clock = data.clock || null;
+  state.opening = data.opening || null;
   updateExportButton();
+  renderOpening();
 
   if (data.move_history.length >= 1) {
     const lastUci = data.move_history[data.move_history.length - 1];
@@ -1968,6 +2039,76 @@ function updateState(data) {
   clockReconcile();
 }
 
+// ---------- WebSocket: notifiche live & multi-tab (Fase 6) ----------
+//
+// Canale di SOLA notifica: il socket segnala che lo stato della partita è
+// cambiato, ma i dati arrivano sempre da REST (GET /game/{id} → updateState).
+// Se la stessa partita è aperta in più tab, una mossa in una tab fa rifetchare
+// le altre. Degradazione pulita: se il WS non si connette (backend vecchio,
+// proxy senza upgrade) l'app funziona esattamente come prima. Spec di design:
+// docs/websocket-live.md.
+let gameSocket = null;          // WebSocket attiva (o null)
+let gameSocketGameId = null;    // game_id per cui vogliamo restare connessi
+let wsReconnectTimer = null;
+
+function connectGameSocket(gameId) {
+  // Chiude l'eventuale socket precedente e ne apre uno nuovo sulla partita
+  // appena diventata attiva nella vista Gioca.
+  disconnectGameSocket();
+  gameSocketGameId = gameId;
+  openGameSocket();
+}
+
+function disconnectGameSocket() {
+  gameSocketGameId = null;
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if (gameSocket) {
+    const ws = gameSocket;
+    gameSocket = null;          // azzero prima: onclose non deve riconnettere
+    try { ws.close(); } catch (e) { /* ignore */ }
+  }
+}
+
+function openGameSocket() {
+  const gameId = gameSocketGameId;
+  if (!gameId) return;
+  let ws;
+  try {
+    ws = new WebSocket(WS_API + '/ws/game/' + gameId);
+  } catch (e) {
+    return;  // WebSocket non disponibile: nessuna notifica live, l'app resta usabile
+  }
+  gameSocket = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (!msg || msg.game_id !== state.gameId) return;
+    if (msg.type === 'deleted') {
+      setStatus('Questa partita è stata cancellata in un\'altra scheda.');
+      return;
+    }
+    if (msg.type !== 'state') return;
+    // Dedup dell'eco della propria mossa: se questa tab sta giocando (thinking),
+    // aggiornerà lo stato da sé — ignoro la notifica. Le altre tab (thinking
+    // false) rifetchano solo se il ply notificato supera quello già applicato.
+    if (state.thinking) return;
+    if (msg.ply <= state.moveHistory.length) return;
+    fetch(API + '/game/' + msg.game_id)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d && state.gameId === d.game_id) updateState(d); })
+      .catch(() => { /* rete assente: si riproverà alla prossima notifica */ });
+  };
+  ws.onclose = () => {
+    // Riconnessione best-effort solo se questo è ancora il socket attivo e la
+    // partita è ancora aperta (una chiusura volontaria azzera gameSocket prima).
+    if (gameSocket === ws && gameSocketGameId === gameId) {
+      gameSocket = null;
+      wsReconnectTimer = setTimeout(openGameSocket, 1500);
+    }
+  };
+  ws.onerror = () => { /* la chiusura è gestita da onclose */ };
+}
+
 // ---------- Export PGN ----------
 
 function updateExportButton() {
@@ -1986,6 +2127,17 @@ function downloadPgn() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+function renderOpening() {
+  const el = document.getElementById('opening-display');
+  if (!state.opening) {
+    el.classList.remove('visible');
+    el.innerHTML = '';
+    return;
+  }
+  el.classList.add('visible');
+  el.innerHTML = `<span class="opening-eco">${state.opening.eco}</span><span class="opening-name">${state.opening.name}</span>`;
 }
 
 function renderMoveList() {
@@ -2245,6 +2397,8 @@ function resetPlayUi() {
   state.clock = null;
   if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
   renderClocks();
+  state.opening = null;
+  renderOpening();
 }
 
 async function startGame() {
@@ -2261,6 +2415,7 @@ async function startGame() {
     });
     const data = await r.json();
     state.gameId = data.game_id;
+    connectGameSocket(data.game_id);
     playSound('move');
     updateState(data);
   } catch (e) {
@@ -2462,6 +2617,7 @@ function showView(name) {
   currentView = name;
   document.getElementById('view-play').style.display = name === 'play' ? 'flex' : 'none';
   document.getElementById('view-training').style.display = name === 'training' ? 'block' : 'none';
+  document.getElementById('view-puzzles').style.display = name === 'puzzles' ? 'block' : 'none';
   document.getElementById('view-history').style.display = name === 'history' ? 'block' : 'none';
   document.getElementById('view-growth').style.display = name === 'growth' ? 'block' : 'none';
   document.querySelectorAll('.topnav button[data-view]').forEach(b => {
@@ -2472,6 +2628,7 @@ function showView(name) {
   if (name === 'history') { closeReplay(); loadHistory(); }
   else if (name === 'growth') { loadGrowth(); }
   else if (name === 'training') { loadTraining(); }
+  else if (name === 'puzzles') { loadPuzzlesView(); }
 }
 
 // fetch con gestione errori uniforme: HTTP non-ok -> Error con il detail FastAPI
@@ -3215,6 +3372,7 @@ async function startEndgameDrill(drill) {
     state.gameId = data.game_id;
     state.playerColor = data.player_color;
     state.engineElo = data.engine_elo;
+    connectGameSocket(data.game_id);
     playSound('move');
     updateState(data);
     // Sovrascrive il "Tocca a te" di updateState con l'obiettivo del drill;
@@ -3224,6 +3382,303 @@ async function startEndgameDrill(drill) {
   } catch (e) {
     setStatus('Errore avvio drill: ' + e.message);
   }
+}
+
+// ---------- Puzzle tattici (Fase 6 — dataset Lichess esterno) ----------
+
+// Stato del trainer puzzle Lichess, separato sia dallo state della partita
+// live sia da `training` (puzzle dai propri errori): i sistemi convivono
+// senza toccarsi. Nessuno stato lato server: il progresso nella linea di
+// soluzione vive qui (moveIndex) e viene validato mossa per mossa dal backend.
+let ext = {
+  puzzle: null,        // risposta di GET /puzzles/next
+  fen: null,           // posizione corrente (aggiornata da next_fen del backend)
+  moveIndex: 0,        // indice nella linea di soluzione (sempre pari qui)
+  lastMove: null,      // highlight: setup move all'inizio, poi la reply avversaria
+  selectedSq: null,
+  legalMoves: [],
+  finished: false,
+  failed: false,
+  expectedUci: null,   // mossa attesa (UCI completo, promo inclusa) su fallimento
+  altMate: false,      // risolto con un matto alternativo (regola Lichess)
+  lineSan: [],         // SAN giocate finora, per il riepilogo linea
+  loading: false,
+  loadError: null,
+  emptyMsg: null,
+  submitError: null,
+  solved: 0,           // punteggio di sessione (non persistito)
+  attempted: 0,
+  themesLoaded: false,
+};
+
+// Etichette italiane per i temi Lichess più comuni; fallback al nome grezzo.
+const EXT_THEME_LABEL = {
+  mate: 'Scacco matto', mateIn1: 'Matto in 1', mateIn2: 'Matto in 2',
+  mateIn3: 'Matto in 3', fork: 'Forchetta', pin: 'Inchiodatura',
+  skewer: 'Infilata', discoveredAttack: 'Attacco di scoperta',
+  backRankMate: 'Matto di corridoio', hangingPiece: 'Pezzo in presa',
+  sacrifice: 'Sacrificio', deflection: 'Deviazione', attraction: 'Attrazione',
+  doubleCheck: 'Scacco doppio', promotion: 'Promozione',
+  trappedPiece: 'Pezzo intrappolato', quietMove: 'Mossa silenziosa',
+  defensiveMove: 'Mossa difensiva', exposedKing: 'Re esposto',
+  smotheredMate: 'Matto affogato', zugzwang: 'Zugzwang',
+  kingsideAttack: 'Attacco lato di re', queensideAttack: 'Attacco lato di donna',
+  endgame: 'Finale', middlegame: 'Mediogioco', opening: 'Apertura',
+  crushing: 'Schiacciante', advantage: 'Vantaggio', equality: 'Pareggio',
+  short: 'Corto', long: 'Lungo', veryLong: 'Molto lungo', oneMove: 'Una mossa',
+  master: 'Partita di maestri', capturingDefender: 'Cattura del difensore',
+  interference: 'Interferenza', clearance: 'Sgombero', xRayAttack: 'Raggi X',
+};
+function extThemeLabel(t) { return EXT_THEME_LABEL[t] || t; }
+
+function loadPuzzlesView() {
+  loadExtThemes();
+  // Il puzzle in corso NON viene abbandonato rientrando nella vista.
+  if (!ext.puzzle || ext.finished) loadExtPuzzle();
+  else renderExtPuzzle();
+}
+
+async function loadExtThemes() {
+  if (ext.themesLoaded) return;   // bundle statico: un fetch basta
+  try {
+    const data = await fetchJson('/puzzles/themes');
+    const sel = document.getElementById('ext-theme');
+    // Solo i temi con abbastanza puzzle da rendere il filtro utile.
+    (data.themes || []).filter(t => t.count >= 8).forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t.theme;
+      opt.textContent = extThemeLabel(t.theme) + ' (' + t.count + ')';
+      sel.appendChild(opt);
+    });
+    ext.themesLoaded = true;
+  } catch (e) { /* select resta "tutti": non blocca il trainer */ }
+}
+
+function extFiltersChanged() {
+  // Cambiare filtro abbandona il puzzle corrente (non conta come tentato).
+  ext.puzzle = null;
+  loadExtPuzzle();
+}
+
+async function loadExtPuzzle() {
+  if (ext.loading) return;
+  const excludeId = ext.puzzle ? ext.puzzle.puzzle_id : null;
+  ext.loading = true;
+  ext.loadError = null;
+  ext.submitError = null;
+  ext.selectedSq = null;
+  ext.legalMoves = [];
+  ext.finished = false;
+  ext.failed = false;
+  ext.expectedUci = null;
+  ext.altMate = false;
+  ext.lineSan = [];
+  ext.moveIndex = 0;
+  renderExtPuzzle();
+
+  const params = new URLSearchParams();
+  const theme = document.getElementById('ext-theme').value;
+  if (theme) params.set('theme', theme);
+  const band = document.getElementById('ext-band').value;
+  if (band) {
+    const parts = band.split('-');
+    params.set('min_rating', parts[0]);
+    params.set('max_rating', parts[1]);
+  }
+  if (excludeId) params.set('exclude', excludeId);
+
+  try {
+    const data = await fetchJson('/puzzles/next?' + params.toString());
+    if (data.puzzle_id == null) {
+      ext.puzzle = null;
+      ext.emptyMsg = data.message || 'Nessun puzzle disponibile.';
+    } else {
+      ext.puzzle = data;
+      ext.fen = data.fen;
+      ext.emptyMsg = null;
+      // Highlight della mossa avversaria che ha creato la posizione.
+      ext.lastMove = { from: data.initial_uci.slice(0, 2), to: data.initial_uci.slice(2, 4) };
+    }
+  } catch (e) {
+    ext.puzzle = null;
+    ext.loadError = e.message;
+  }
+  ext.loading = false;
+  renderExtPuzzle();
+}
+
+function renderExtPuzzle() {
+  const boardWrap = document.getElementById('ext-board');
+  const statusEl = document.getElementById('ext-status');
+  const metaEl = document.getElementById('ext-meta');
+  const fbEl = document.getElementById('ext-feedback');
+  const subEl = document.getElementById('ext-sub');
+  const lineEl = document.getElementById('ext-line');
+  const scoreEl = document.getElementById('ext-score');
+  const nextBtn = document.getElementById('ext-next-btn');
+
+  nextBtn.disabled = ext.loading;
+  scoreEl.textContent = ext.attempted > 0
+    ? 'Sessione: ' + ext.solved + '/' + ext.attempted + ' risolti'
+    : '';
+
+  if (!ext.puzzle) {
+    boardWrap.innerHTML = '';
+    metaEl.innerHTML = '';
+    lineEl.textContent = '';
+    fbEl.className = 'puzzle-feedback';
+    if (ext.loading) {
+      statusEl.textContent = 'Caricamento puzzle…';
+      fbEl.textContent = '';
+      subEl.textContent = '';
+    } else if (ext.loadError) {
+      statusEl.textContent = '';
+      fbEl.textContent = 'Errore: backend non raggiungibile (' + ext.loadError + ')';
+      subEl.textContent = '';
+    } else {
+      statusEl.textContent = 'Nessun puzzle';
+      fbEl.textContent = ext.emptyMsg || '';
+      subEl.textContent = 'Prova ad allargare i filtri di tema o difficoltà.';
+    }
+    return;
+  }
+
+  const pz = ext.puzzle;
+  const sideIt = pz.player_to_move === 'white' ? 'il Bianco' : 'il Nero';
+  const interactive = !ext.finished && !ext.loading;
+
+  boardWrap.innerHTML = '';
+  boardWrap.appendChild(buildBoardEl({
+    fen: ext.fen,
+    orientation: pz.player_to_move,
+    lastMove: ext.lastMove,
+    selectedSq: ext.selectedSq,
+    legalMoves: ext.legalMoves,
+    onSquare: interactive ? onExtSquare : null,
+  }));
+
+  metaEl.innerHTML =
+    '<span class="ext-rating-tag" title="Rating Lichess del puzzle">' + pz.rating + '</span>' +
+    pz.themes.slice(0, 3).map(t =>
+      '<span class="ext-theme-tag">' + extThemeLabel(t) + '</span>').join('') +
+    (pz.solution_moves > 1
+      ? '<span>Linea di ' + pz.solution_moves + ' mosse</span>' : '');
+
+  lineEl.textContent = ext.lineSan.length ? ext.lineSan.join(' ') : '';
+
+  const solverStep = ext.moveIndex / 2 + 1;
+  if (!ext.finished) {
+    statusEl.textContent = 'Muove ' + sideIt +
+      (pz.solution_moves > 1 ? ' — mossa ' + solverStep + ' di ' + pz.solution_moves : '');
+    statusEl.className = 'status-bar status-turn';
+    fbEl.className = 'puzzle-feedback' + (ext.submitError ? ' ko' : '');
+    fbEl.textContent = ext.submitError ? 'Errore invio risposta: ' + ext.submitError : '';
+    subEl.textContent = ext.moveIndex === 0
+      ? 'Trova la mossa migliore per ' + sideIt + '.'
+      : 'Corretto — continua la sequenza.';
+    return;
+  }
+
+  statusEl.className = 'status-bar';
+  if (ext.failed) {
+    statusEl.textContent = 'Puzzle fallito';
+    fbEl.className = 'puzzle-feedback ko';
+    fbEl.textContent = 'Sbagliato — la mossa giusta era ' + fmtUciMove(ext.expectedUci);
+    subEl.textContent = 'La soluzione è evidenziata sulla board.';
+  } else {
+    statusEl.textContent = 'Puzzle risolto!';
+    fbEl.className = 'puzzle-feedback ok';
+    fbEl.textContent = ext.altMate ? 'Corretto — matto alternativo, vale comunque!' : 'Corretto!';
+    subEl.textContent = pz.lichess_url
+      ? 'Dalla partita Lichess: ' + pz.lichess_url : '';
+  }
+}
+
+// Stessa interazione click-click delle altre board; la validazione vera è il
+// match sul backend (candidati client-side = solo aiuto visivo).
+async function onExtSquare(sq) {
+  if (!ext.puzzle || ext.finished || ext.loading) return;
+  const color = ext.puzzle.player_to_move;
+  const pieceMap = fenToMap(ext.fen);
+
+  if (ext.selectedSq) {
+    if (ext.selectedSq === sq) {
+      ext.selectedSq = null;
+      ext.legalMoves = [];
+      renderExtPuzzle();
+      return;
+    }
+    const move = ext.legalMoves.find(m => m.to === sq);
+    if (move) {
+      let uci = move.from + move.to;
+      if (move.promo) uci += await askPromotion(color);
+      await submitExtAnswer(uci);
+      return;
+    }
+  }
+
+  const piece = pieceMap[sq];
+  if (piece) {
+    const isOwn = color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase();
+    if (isOwn) {
+      ext.selectedSq = sq;
+      ext.legalMoves = generateMoveCandidates(ext.fen, sq, color);
+      renderExtPuzzle();
+      return;
+    }
+  }
+
+  ext.selectedSq = null;
+  ext.legalMoves = [];
+  renderExtPuzzle();
+}
+
+async function submitExtAnswer(uci) {
+  ext.selectedSq = null;
+  ext.legalMoves = [];
+  ext.loading = true;
+  renderExtPuzzle();
+  try {
+    const d = await fetchJson('/puzzles/' + ext.puzzle.puzzle_id + '/answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ move_index: ext.moveIndex, move_uci: uci }),
+    });
+    ext.submitError = null;
+    if (!d.correct) {
+      // Puzzle fallito: la board resta sulla posizione dell'errore, con la
+      // mossa attesa evidenziata (stesso pattern del solver Allenamento).
+      ext.finished = true;
+      ext.failed = true;
+      ext.attempted++;
+      ext.expectedUci = d.expected_uci;
+      ext.lastMove = { from: d.expected_uci.slice(0, 2), to: d.expected_uci.slice(2, 4) };
+      playSound('capture');
+    } else if (d.completed) {
+      ext.lineSan.push(d.played_san);
+      ext.fen = d.next_fen;
+      ext.lastMove = { from: uci.slice(0, 2), to: uci.slice(2, 4) };
+      ext.finished = true;
+      ext.altMate = d.solved_by_alternate_mate;
+      ext.solved++;
+      ext.attempted++;
+      playSound('check');
+    } else {
+      // Mossa giusta, linea non finita: il backend ha già applicato anche la
+      // contromossa avversaria — next_fen è di nuovo col solutore al tratto.
+      ext.lineSan.push(d.played_san, d.reply_san);
+      ext.fen = d.next_fen;
+      ext.moveIndex = d.next_move_index;
+      ext.lastMove = { from: d.reply_uci.slice(0, 2), to: d.reply_uci.slice(2, 4) };
+      playSound('move');
+    }
+  } catch (e) {
+    // Mossa illegale (heuristica client troppo permissiva) o rete: il puzzle
+    // resta in corso, si può ritentare.
+    ext.submitError = e.message;
+  }
+  ext.loading = false;
+  renderExtPuzzle();
 }
 
 renderBoard();

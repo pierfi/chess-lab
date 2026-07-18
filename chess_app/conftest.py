@@ -15,9 +15,10 @@ os.close(_fd)
 os.environ["CHESS_LAB_DB"] = _TEST_DB_PATH
 
 # Import DOPO aver settato la env var, così l'engine punta al DB temporaneo.
-from backend.db import init_db  # noqa: E402
+from backend.db import init_db, seed_external_puzzles  # noqa: E402
 
 init_db()  # crea lo schema (stesse tabelle della migration Alembic iniziale)
+seed_external_puzzles()  # bundle puzzle Lichess (Fase 6), come nel lifespan
 
 
 @atexit.register

@@ -125,6 +125,111 @@ class TestGetGame:
 
 
 # -------------------------------------------------------------------
+# Identificazione apertura ECO (Fase 5) — longest-prefix match, iniettata
+# direttamente in games[] per avere una sequenza di mosse deterministica
+# (Stockfish a bassa forza non garantisce di restare "a libro").
+# -------------------------------------------------------------------
+def _inject_game(gid: str, uci_moves: list[str], player_color: str = "white", start_fen: str | None = None):
+    board = chess.Board(start_fen) if start_fen else chess.Board()
+    move_objects = []
+    for uci in uci_moves:
+        mv = chess.Move.from_uci(uci)
+        move_objects.append(mv)
+        board.push(mv)
+    games[gid] = {
+        "board": board,
+        "player_color": player_color,
+        "engine_elo": 800,
+        "move_objects": move_objects,
+        "last_engine_move": uci_moves[-1] if uci_moves else None,
+        "created_at": "2026.07.18",
+        "start_fen": start_fen,
+    }
+
+
+class TestOpening:
+    def test_no_moves_no_opening(self, client, white_game):
+        r = client.get(f"/game/{white_game['game_id']}")
+        assert r.status_code == 200
+        assert r.json()["opening"] is None
+
+    def test_single_move_matches(self, client):
+        _inject_game("eco1", ["e2e4"])
+        r = client.get("/game/eco1")
+        assert r.status_code == 200
+        opening = r.json()["opening"]
+        assert opening == {"eco": "B00", "name": "King's Pawn Game"}
+
+    def test_updates_ply_by_ply(self, client):
+        # 1.e4 -> King's Pawn Game (B00)
+        _inject_game("eco2a", ["e2e4"])
+        assert client.get("/game/eco2a").json()["opening"] == {"eco": "B00", "name": "King's Pawn Game"}
+
+        # 1.e4 c5 -> Sicilian Defense (B20)
+        _inject_game("eco2b", ["e2e4", "c7c5"])
+        assert client.get("/game/eco2b").json()["opening"] == {"eco": "B20", "name": "Sicilian Defense"}
+
+        # 1.e4 c5 2.Nf3 -> ancora Sicilian Defense, ma riga più lunga (B27)
+        _inject_game("eco2c", ["e2e4", "c7c5", "g1f3"])
+        assert client.get("/game/eco2c").json()["opening"] == {"eco": "B27", "name": "Sicilian Defense"}
+
+    def test_well_known_lines(self, client):
+        # Ruy Lopez
+        _inject_game("eco3a", ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5"])
+        opening = client.get("/game/eco3a").json()["opening"]
+        assert opening["eco"] == "C60"
+        assert opening["name"] == "Ruy Lopez"
+
+        # Italian Game: Giuoco Piano
+        _inject_game("eco3b", ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5"])
+        opening = client.get("/game/eco3b").json()["opening"]
+        assert opening["eco"] == "C50"
+        assert "Italian Game" in opening["name"]
+
+    def test_unknown_sequence_is_null(self, client):
+        # a2a3 non è tra le prime mosse presenti nel book (verificato contro
+        # data/eco.json) — nessun prefisso può matchare.
+        _inject_game("eco4", ["a2a3", "a7a6"])
+        r = client.get("/game/eco4")
+        assert r.status_code == 200
+        assert r.json()["opening"] is None
+
+    def test_divergence_falls_back_to_shorter_match(self, client):
+        # 1.e4 c5 è nel book (Sicilian Defense), ma la terza mossa qui (2.e5?!,
+        # verificato assente da ogni riga che inizia con e4 c5 nel dataset) non
+        # è una continuazione nota: deve restare l'ultimo prefisso che matcha,
+        # non tornare a null.
+        _inject_game("eco5", ["e2e4", "c7c5", "e4e5"])
+        opening = client.get("/game/eco5").json()["opening"]
+        assert opening == {"eco": "B20", "name": "Sicilian Defense"}
+
+    def test_custom_start_fen_never_matches(self, client):
+        # Un drill di finali (start_fen custom) non ha senso da matchare contro
+        # un book costruito sulla posizione standard, anche se la board risulta
+        # per puro caso identica a una riga nota.
+        _inject_game("eco6", ["e2e4"], start_fen=chess.Board().fen())
+        opening = client.get("/game/eco6").json()["opening"]
+        assert opening is None
+
+    def test_opening_wired_into_move_and_new_game(self, client, white_game):
+        # /game/new: nessuna mossa ancora, opening None (già coperto sopra),
+        # /game/move deve aggiornare il campo dopo la mossa del player.
+        gid = white_game["game_id"]
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        assert r.status_code == 200
+        assert "opening" in r.json()
+
+    def test_opening_in_replay(self, client):
+        _inject_game("eco7", ["e2e4", "c7c5"])
+        # /game/{id}/replay legge le mosse dalla tabella `moves` nel DB, non
+        # dalla cache: per una partita solo-cache come questa la lista risulta
+        # vuota, quindi qui si verifica solo la presenza del campo nello shape.
+        r = client.get("/game/eco7/replay")
+        assert r.status_code == 200
+        assert "opening" in r.json()
+
+
+# -------------------------------------------------------------------
 # /game/analyze
 # -------------------------------------------------------------------
 class TestAnalyze:
@@ -1670,6 +1775,7 @@ class TestAnalyzeStartFen:
         assert ply1["move_uci"] == "e2e4"
 
 
+
 # -------------------------------------------------------------------
 # Time control (Fase 6) — clock digitale + incremento Fischer. time_control
 # opzionale su /game/new: None (default, vedi white_game/black_game) = partita
@@ -1903,3 +2009,305 @@ class TestTimeControl:
         data = r.json()
         assert data["clock"] == {"white": None, "black": None}
         assert data["time_control"] is None
+
+
+class TestWebSocketLive:
+    """Fase 6 — notifiche live di cambio stato via WebSocket (docs/websocket-live.md)."""
+
+    def test_move_notifies_connected_socket(self, client, white_game):
+        gid = white_game["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid}") as ws:
+            r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+            assert r.status_code == 200
+            msg = ws.receive_json()
+            assert msg["type"] == "state"
+            assert msg["game_id"] == gid
+            # player + eventuale risposta engine → ply già consolidato
+            assert msg["ply"] == len(r.json()["move_history"])
+            assert msg["ply"] >= 1
+
+    def test_multi_tab_both_receive(self, client, white_game):
+        """Due connessioni indipendenti sulla stessa game_id: entrambe ricevono
+        la notifica di una singola mossa (il caso multi-tab della roadmap)."""
+        gid = white_game["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid}") as ws1, \
+             client.websocket_connect(f"/ws/game/{gid}") as ws2:
+            r = client.post("/game/move", json={"game_id": gid, "move_uci": "d2d4"})
+            assert r.status_code == 200
+            m1 = ws1.receive_json()
+            m2 = ws2.receive_json()
+            for m in (m1, m2):
+                assert m["type"] == "state"
+                assert m["game_id"] == gid
+
+    def test_isolation_per_game_id(self, client):
+        """Una connessione su A non riceve gli eventi di B: la prima notifica
+        vista dalla socket di A è quella di A, non quella (precedente) di B."""
+        a = client.post("/game/new", json={"player_color": "white", "engine_elo": 800}).json()
+        b = client.post("/game/new", json={"player_color": "white", "engine_elo": 800}).json()
+        gid_a, gid_b = a["game_id"], b["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid_a}") as ws_a:
+            # Muovo prima su B (nessun subscriber di B), poi su A.
+            assert client.post("/game/move", json={"game_id": gid_b, "move_uci": "e2e4"}).status_code == 200
+            assert client.post("/game/move", json={"game_id": gid_a, "move_uci": "e2e4"}).status_code == 200
+            msg = ws_a.receive_json()
+            assert msg["type"] == "state"
+            assert msg["game_id"] == gid_a
+
+    def test_delete_notifies(self, client, white_game):
+        gid = white_game["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid}") as ws:
+            r = client.delete(f"/game/{gid}")
+            assert r.status_code == 200
+            msg = ws.receive_json()
+            assert msg["type"] == "deleted"
+            assert msg["game_id"] == gid
+
+    def test_connect_unknown_game_id_ok(self, client):
+        """Il socket è un canale di sola notifica: una game_id inesistente si
+        connette senza errore (non riceverà mai nulla)."""
+        with client.websocket_connect("/ws/game/deadbeef") as ws:
+            assert ws is not None
+
+
+# -------------------------------------------------------------------
+# Fase 6 — Modalità puzzle (dataset Lichess esterno, /puzzles/*)
+# Sistema distinto dai puzzle self-generated di Fase 4 (/training/puzzles):
+# tabella external_puzzles seminata dal bundle statico in conftest.
+# -------------------------------------------------------------------
+
+from backend.db import ExternalPuzzle, seed_external_puzzles  # noqa: E402
+
+
+def _ext_solution(puzzle_id: str) -> list[str]:
+    """Legge la soluzione dal DB (mai esposta dall'API prima della risposta)."""
+    with SessionLocal() as db:
+        row = db.get(ExternalPuzzle, puzzle_id)
+        assert row is not None
+        return row.moves_uci.split()
+
+
+class TestExternalPuzzlesNext:
+    def test_seed_idempotent(self):
+        # conftest ha già seminato: una seconda chiamata non duplica nulla.
+        count = seed_external_puzzles()
+        assert count == seed_external_puzzles()
+        with SessionLocal() as db:
+            rows = db.execute(select(ExternalPuzzle)).scalars().all()
+        assert len(rows) == count > 0
+
+    def test_next_shape(self, client):
+        r = client.get("/puzzles/next")
+        assert r.status_code == 200
+        pz = r.json()
+        assert pz["puzzle_id"]
+        assert isinstance(pz["rating"], int)
+        assert isinstance(pz["themes"], list) and pz["themes"]
+        assert pz["solution_moves"] >= 1
+        assert "initial_uci" in pz
+        # player_to_move coerente col campo attivo del FEN
+        board = chess.Board(pz["fen"])
+        expected_side = "white" if board.turn == chess.WHITE else "black"
+        assert pz["player_to_move"] == expected_side
+        # la soluzione non è mai esposta nella shape pubblica
+        assert "moves" not in pz and "moves_uci" not in pz
+
+    def test_next_rating_filter(self, client):
+        r = client.get("/puzzles/next", params={"min_rating": 1600, "max_rating": 2000})
+        pz = r.json()
+        assert pz["puzzle_id"]
+        assert 1600 <= pz["rating"] <= 2000
+
+    def test_next_theme_filter(self, client):
+        r = client.get("/puzzles/next", params={"theme": "mateIn2"})
+        pz = r.json()
+        assert pz["puzzle_id"]
+        assert "mateIn2" in pz["themes"]
+
+    def test_next_theme_word_boundary(self, client):
+        # "mate" non deve matchare per sottostringa (mateIn1/mateIn2/...):
+        # ogni puzzle ritornato deve avere ESATTAMENTE il tema "mate".
+        for _ in range(5):
+            pz = client.get("/puzzles/next", params={"theme": "mate"}).json()
+            assert pz["puzzle_id"]
+            assert "mate" in pz["themes"]
+
+    def test_next_no_match(self, client):
+        r = client.get("/puzzles/next", params={"min_rating": 9000})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["puzzle_id"] is None
+        assert "message" in data
+
+    def test_next_exclude(self, client):
+        first = client.get("/puzzles/next").json()
+        for _ in range(5):
+            nxt = client.get("/puzzles/next", params={"exclude": first["puzzle_id"]}).json()
+            assert nxt["puzzle_id"] != first["puzzle_id"]
+
+    def test_next_exclude_only_match_falls_back(self, client):
+        # Se l'unico puzzle che soddisfa i filtri è quello escluso, viene
+        # riproposto (best-effort) invece di rispondere "nessun puzzle".
+        pz = client.get("/puzzles/next").json()
+        r = client.get(
+            "/puzzles/next",
+            params={
+                "min_rating": pz["rating"],
+                "max_rating": pz["rating"],
+                "theme": pz["themes"][0],
+                "exclude": pz["puzzle_id"],
+            },
+        )
+        data = r.json()
+        assert data["puzzle_id"] is not None
+
+    def test_themes_list(self, client):
+        r = client.get("/puzzles/themes")
+        assert r.status_code == 200
+        themes = r.json()["themes"]
+        assert themes
+        assert all("theme" in t and t["count"] >= 1 for t in themes)
+        # ordinati per frequenza decrescente
+        counts = [t["count"] for t in themes]
+        assert counts == sorted(counts, reverse=True)
+
+
+class TestExternalPuzzlesAnswer:
+    def test_full_correct_line(self, client):
+        # Un puzzle multi-mossa: risolto passo-passo con la soluzione vera.
+        pz = client.get("/puzzles/next", params={"theme": "long"}).json()
+        solution = _ext_solution(pz["puzzle_id"])
+        assert len(solution) >= 3
+        idx = 0
+        board = chess.Board(pz["fen"])
+        while True:
+            r = client.post(
+                f"/puzzles/{pz['puzzle_id']}/answer",
+                json={"move_index": idx, "move_uci": solution[idx]},
+            )
+            assert r.status_code == 200
+            d = r.json()
+            assert d["correct"] is True
+            assert d["expected_uci"] == solution[idx]
+            board.push(chess.Move.from_uci(solution[idx]))
+            if d["completed"]:
+                assert d["reply_uci"] is None
+                assert d["next_fen"] == board.fen()
+                assert idx == len(solution) - 1
+                break
+            # la contromossa avversaria è quella della linea, e next_fen è la
+            # posizione dopo mossa+risposta (di nuovo solutore al tratto)
+            assert d["reply_uci"] == solution[idx + 1]
+            assert d["reply_san"]
+            board.push(chess.Move.from_uci(d["reply_uci"]))
+            assert d["next_fen"] == board.fen()
+            assert d["next_move_index"] == idx + 2
+            idx = d["next_move_index"]
+
+    def test_wrong_but_legal_move(self, client):
+        pz = client.get("/puzzles/next").json()
+        solution = _ext_solution(pz["puzzle_id"])
+        board = chess.Board(pz["fen"])
+
+        def gives_mate(m):
+            probe = board.copy()
+            probe.push(m)
+            return probe.is_checkmate()
+
+        wrong = next(
+            (m for m in board.legal_moves if m.uci() != solution[0] and not gives_mate(m)),
+            None,
+        )
+        assert wrong is not None
+        r = client.post(
+            f"/puzzles/{pz['puzzle_id']}/answer",
+            json={"move_index": 0, "move_uci": wrong.uci()},
+        )
+        assert r.status_code == 200
+        d = r.json()
+        assert d["correct"] is False
+        assert d["completed"] is False
+        assert d["expected_uci"] == solution[0]
+        assert d["played_san"]
+        assert d["next_fen"] is None and d["reply_uci"] is None
+
+    def test_alternate_mate_accepted(self, client):
+        # Regola Lichess: un matto immediato diverso dalla mossa attesa è
+        # comunque corretto. Il puzzle candidato viene CERCATO nel bundle (non
+        # hardcoded): il test resta valido se il bundle viene rigenerato.
+        with SessionLocal() as db:
+            rows = db.execute(select(ExternalPuzzle)).scalars().all()
+        candidate = None
+        for row in rows:
+            board = chess.Board(row.fen)
+            expected = chess.Move.from_uci(row.moves_uci.split()[0])
+            for m in board.legal_moves:
+                if m == expected:
+                    continue
+                probe = board.copy()
+                probe.push(m)
+                if probe.is_checkmate():
+                    candidate = (row.id, m.uci())
+                    break
+            if candidate:
+                break
+        if candidate is None:
+            pytest.skip("nessun puzzle con matto alternativo nel bundle corrente")
+        puzzle_id, mate_uci = candidate
+        r = client.post(
+            f"/puzzles/{puzzle_id}/answer",
+            json={"move_index": 0, "move_uci": mate_uci},
+        )
+        d = r.json()
+        assert d["correct"] is True
+        assert d["completed"] is True
+        assert d["solved_by_alternate_mate"] is True
+
+    def test_illegal_move_400(self, client):
+        pz = client.get("/puzzles/next").json()
+        r = client.post(
+            f"/puzzles/{pz['puzzle_id']}/answer",
+            json={"move_index": 0, "move_uci": "a1a1"},
+        )
+        assert r.status_code == 400
+
+    def test_bad_uci_400(self, client):
+        pz = client.get("/puzzles/next").json()
+        r = client.post(
+            f"/puzzles/{pz['puzzle_id']}/answer",
+            json={"move_index": 0, "move_uci": "not-a-move"},
+        )
+        assert r.status_code == 400
+
+    def test_bad_move_index_400(self, client):
+        pz = client.get("/puzzles/next").json()
+        solution = _ext_solution(pz["puzzle_id"])
+        # indice dispari (turno avversario) e indice oltre la linea
+        for idx in (1, len(solution)):
+            r = client.post(
+                f"/puzzles/{pz['puzzle_id']}/answer",
+                json={"move_index": idx, "move_uci": solution[0]},
+            )
+            assert r.status_code == 400
+
+    def test_unknown_puzzle_404(self, client):
+        r = client.post(
+            "/puzzles/zzzzzz/answer", json={"move_index": 0, "move_uci": "e2e4"}
+        )
+        assert r.status_code == 404
+
+    def test_distinct_from_training_puzzles(self, client):
+        # I puzzle esterni non creano righe nelle tabelle Fase 4: rispondere a
+        # un puzzle Lichess non genera carte SRS né puzzle self-generated.
+        with SessionLocal() as db:
+            srs_before = len(db.execute(select(SrsCard)).scalars().all())
+            puz_before = len(db.execute(select(Puzzle)).scalars().all())
+        pz = client.get("/puzzles/next").json()
+        solution = _ext_solution(pz["puzzle_id"])
+        client.post(
+            f"/puzzles/{pz['puzzle_id']}/answer",
+            json={"move_index": 0, "move_uci": solution[0]},
+        )
+        with SessionLocal() as db:
+            assert len(db.execute(select(SrsCard)).scalars().all()) == srs_before
+            assert len(db.execute(select(Puzzle)).scalars().all()) == puz_before
