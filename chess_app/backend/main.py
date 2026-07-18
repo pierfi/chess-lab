@@ -22,24 +22,28 @@ from sqlalchemy import and_, func, or_, select
 try:
     from backend.db import (
         AnalysisResult,
+        ExternalPuzzle,
         Game,
         Move,
         Puzzle,
         SessionLocal,
         SrsCard,
         init_db,
+        seed_external_puzzles,
         session_scope,
         utcnow,
     )
 except ModuleNotFoundError:  # pragma: no cover - solo per uvicorn da backend/
     from db import (
         AnalysisResult,
+        ExternalPuzzle,
         Game,
         Move,
         Puzzle,
         SessionLocal,
         SrsCard,
         init_db,
+        seed_external_puzzles,
         session_scope,
         utcnow,
     )
@@ -52,6 +56,9 @@ async def lifespan(_app: FastAPI):
     # applicate per-connessione dall'event listener in db.py). Non eseguito dai
     # test con TestClient(app) senza `with` — lì è conftest.py a creare le tabelle.
     init_db()
+    # Semina i puzzle Lichess dal bundle statico (idempotente, no-op se già
+    # presenti — vedi db.seed_external_puzzles).
+    seed_external_puzzles()
     yield
 
 
@@ -1707,3 +1714,179 @@ def start_endgame(endgame_id: str, req: EndgameStartRequest):
     state["endgame_id"] = endgame_id
     state["goal"] = drill["goal"]
     return state
+
+# =====================================================================
+# Fase 6 — Modalità puzzle (dataset Lichess esterno, bundle statico).
+# Sistema DISTINTO dai puzzle self-generated di Fase 4 (/training/puzzles):
+# tabella dedicata external_puzzles, nessuna FK verso games, nessun SRS.
+# Validazione STATELESS: il client manda (puzzle_id, move_index, move_uci),
+# il server ricostruisce la posizione dalla soluzione persistita — nessuno
+# stato di sessione lato server, nessuna scrittura DB.
+# =====================================================================
+
+class ExternalPuzzleAnswerRequest(BaseModel):
+    # Indice della mossa nella linea di soluzione (0-based, pari = tocca al
+    # solutore: le mosse dispari sono le risposte avversarie auto-giocate).
+    move_index: int = Field(default=0, ge=0)
+    move_uci: str
+
+def _external_puzzle_to_dict(pz: ExternalPuzzle) -> dict:
+    """Shape pubblica del puzzle: la soluzione NON viene mai esposta qui —
+    solo la sua lunghezza (in mosse del solutore) per il progresso UI."""
+    solution = pz.moves_uci.split()
+    return {
+        "puzzle_id": pz.id,
+        "fen": pz.fen,
+        "initial_uci": pz.initial_uci,
+        "player_to_move": "white" if pz.fen.split()[1] == "w" else "black",
+        "rating": pz.rating,
+        "themes": pz.themes.split(),
+        "solution_moves": (len(solution) + 1) // 2,
+        "lichess_url": pz.lichess_url,
+    }
+
+@app.get("/puzzles/next")
+def next_external_puzzle(
+    theme: str | None = Query(default=None),
+    min_rating: int | None = Query(default=None, ge=0),
+    max_rating: int | None = Query(default=None, ge=0),
+    exclude: str | None = Query(default=None),
+):
+    """Puzzle casuale dal bundle Lichess, filtrabile per tema e fascia di
+    rating. ``exclude`` (id dell'ultimo puzzle mostrato) evita la ripetizione
+    immediata quando più di un puzzle soddisfa i filtri. Selezione con
+    ORDER BY RANDOM(): a ~400 righe il costo è irrilevante."""
+    conds = []
+    if theme is not None:
+        # themes è spazio-separata: padding con spazi per il match a parola
+        # intera (evita che "pin" catturi "kingsideAttack" o "pinning").
+        conds.append(
+            func.instr(" " + ExternalPuzzle.themes + " ", f" {theme} ") > 0
+        )
+    if min_rating is not None:
+        conds.append(ExternalPuzzle.rating >= min_rating)
+    if max_rating is not None:
+        conds.append(ExternalPuzzle.rating <= max_rating)
+
+    with session_scope() as db:
+        stmt = select(ExternalPuzzle).where(*conds)
+        if exclude is not None:
+            excluded = stmt.where(ExternalPuzzle.id != exclude)
+            pz = db.execute(
+                excluded.order_by(func.random()).limit(1)
+            ).scalar_one_or_none()
+            # exclude è best-effort: se l'unico match è proprio quello escluso,
+            # meglio riproporlo che rispondere "nessun puzzle".
+            if pz is None:
+                pz = db.execute(
+                    stmt.order_by(func.random()).limit(1)
+                ).scalar_one_or_none()
+        else:
+            pz = db.execute(
+                stmt.order_by(func.random()).limit(1)
+            ).scalar_one_or_none()
+
+        if pz is None:
+            return {
+                "puzzle_id": None,
+                "message": "Nessun puzzle corrisponde ai filtri selezionati.",
+            }
+        return _external_puzzle_to_dict(pz)
+
+@app.get("/puzzles/themes")
+def external_puzzle_themes():
+    """Temi disponibili nel bundle con conteggio, per il filtro frontend.
+    Aggregazione in Python: ~400 righe, nessun bisogno di SQL elaborato."""
+    with session_scope() as db:
+        rows = db.execute(select(ExternalPuzzle.themes)).scalars().all()
+    counts: dict[str, int] = {}
+    for themes in rows:
+        for t in themes.split():
+            counts[t] = counts.get(t, 0) + 1
+    return {
+        "themes": [
+            {"theme": t, "count": n}
+            for t, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+    }
+
+@app.post("/puzzles/{puzzle_id}/answer")
+def answer_external_puzzle(puzzle_id: str, req: ExternalPuzzleAnswerRequest):
+    """Valida la mossa del solutore all'indice ``move_index`` della linea di
+    soluzione. Stateless: la posizione viene ricostruita dalla FEN + il
+    prefisso di soluzione già giocato (bundle pre-validato in build, il replay
+    non può fallire). Regola Lichess: un MATTO immediato alternativo alla
+    mossa attesa è comunque corretto (e completa il puzzle).
+
+    Se corretta e la linea non è finita, la risposta include la contromossa
+    avversaria (reply) e ``next_fen`` — il client non deve applicare mosse a
+    una FEN da solo. Se sbagliata il puzzle è fallito: ``expected_uci`` è
+    sempre presente per mostrare la soluzione del passo corrente."""
+    with session_scope() as db:
+        pz = db.get(ExternalPuzzle, puzzle_id)
+        if pz is None:
+            raise HTTPException(status_code=404, detail="Puzzle not found")
+        solution = pz.moves_uci.split()
+        fen = pz.fen
+
+    if req.move_index >= len(solution) or req.move_index % 2 != 0:
+        raise HTTPException(status_code=400, detail="Invalid move_index")
+
+    board = chess.Board(fen)
+    for uci in solution[:req.move_index]:
+        board.push(chess.Move.from_uci(uci))
+
+    try:
+        played = chess.Move.from_uci(req.move_uci.strip().lower())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UCI format")
+    if played not in board.legal_moves:
+        raise HTTPException(status_code=400, detail="Illegal move")
+
+    expected_uci = solution[req.move_index]
+    expected = chess.Move.from_uci(expected_uci)
+
+    alternate_mate = False
+    if played != expected:
+        probe = board.copy()
+        probe.push(played)
+        alternate_mate = probe.is_checkmate()
+
+    correct = played == expected or alternate_mate
+    played_san = board.san(played)
+
+    if not correct:
+        return {
+            "correct": False,
+            "completed": False,
+            "solved_by_alternate_mate": False,
+            "expected_uci": expected_uci,
+            "played_san": played_san,
+            "reply_uci": None,
+            "reply_san": None,
+            "next_fen": None,
+            "next_move_index": None,
+        }
+
+    board.push(played)
+    completed = alternate_mate or req.move_index + 1 >= len(solution)
+    reply_uci = reply_san = None
+    next_move_index = None
+    if not completed:
+        reply_uci = solution[req.move_index + 1]
+        reply = chess.Move.from_uci(reply_uci)
+        reply_san = board.san(reply)
+        board.push(reply)
+        next_move_index = req.move_index + 2
+
+    return {
+        "correct": True,
+        "completed": completed,
+        "solved_by_alternate_mate": alternate_mate,
+        "expected_uci": expected_uci,
+        "played_san": played_san,
+        "reply_uci": reply_uci,
+        "reply_san": reply_san,
+        "next_fen": board.fen(),
+        "next_move_index": next_move_index,
+    }
