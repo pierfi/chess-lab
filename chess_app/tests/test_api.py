@@ -1667,3 +1667,245 @@ class TestAnalyzeStartFen:
         assert ply1["color"] == "white"
         assert ply1["move_number"] == 1
         assert ply1["move_uci"] == "e2e4"
+
+# -------------------------------------------------------------------
+# Fase 6 — Modalità puzzle (dataset Lichess esterno, /puzzles/*)
+# Sistema distinto dai puzzle self-generated di Fase 4 (/training/puzzles):
+# tabella external_puzzles seminata dal bundle statico in conftest.
+# -------------------------------------------------------------------
+
+from backend.db import ExternalPuzzle, seed_external_puzzles  # noqa: E402
+
+
+def _ext_solution(puzzle_id: str) -> list[str]:
+    """Legge la soluzione dal DB (mai esposta dall'API prima della risposta)."""
+    with SessionLocal() as db:
+        row = db.get(ExternalPuzzle, puzzle_id)
+        assert row is not None
+        return row.moves_uci.split()
+
+
+class TestExternalPuzzlesNext:
+    def test_seed_idempotent(self):
+        # conftest ha già seminato: una seconda chiamata non duplica nulla.
+        count = seed_external_puzzles()
+        assert count == seed_external_puzzles()
+        with SessionLocal() as db:
+            rows = db.execute(select(ExternalPuzzle)).scalars().all()
+        assert len(rows) == count > 0
+
+    def test_next_shape(self, client):
+        r = client.get("/puzzles/next")
+        assert r.status_code == 200
+        pz = r.json()
+        assert pz["puzzle_id"]
+        assert isinstance(pz["rating"], int)
+        assert isinstance(pz["themes"], list) and pz["themes"]
+        assert pz["solution_moves"] >= 1
+        assert "initial_uci" in pz
+        # player_to_move coerente col campo attivo del FEN
+        board = chess.Board(pz["fen"])
+        expected_side = "white" if board.turn == chess.WHITE else "black"
+        assert pz["player_to_move"] == expected_side
+        # la soluzione non è mai esposta nella shape pubblica
+        assert "moves" not in pz and "moves_uci" not in pz
+
+    def test_next_rating_filter(self, client):
+        r = client.get("/puzzles/next", params={"min_rating": 1600, "max_rating": 2000})
+        pz = r.json()
+        assert pz["puzzle_id"]
+        assert 1600 <= pz["rating"] <= 2000
+
+    def test_next_theme_filter(self, client):
+        r = client.get("/puzzles/next", params={"theme": "mateIn2"})
+        pz = r.json()
+        assert pz["puzzle_id"]
+        assert "mateIn2" in pz["themes"]
+
+    def test_next_theme_word_boundary(self, client):
+        # "mate" non deve matchare per sottostringa (mateIn1/mateIn2/...):
+        # ogni puzzle ritornato deve avere ESATTAMENTE il tema "mate".
+        for _ in range(5):
+            pz = client.get("/puzzles/next", params={"theme": "mate"}).json()
+            assert pz["puzzle_id"]
+            assert "mate" in pz["themes"]
+
+    def test_next_no_match(self, client):
+        r = client.get("/puzzles/next", params={"min_rating": 9000})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["puzzle_id"] is None
+        assert "message" in data
+
+    def test_next_exclude(self, client):
+        first = client.get("/puzzles/next").json()
+        for _ in range(5):
+            nxt = client.get("/puzzles/next", params={"exclude": first["puzzle_id"]}).json()
+            assert nxt["puzzle_id"] != first["puzzle_id"]
+
+    def test_next_exclude_only_match_falls_back(self, client):
+        # Se l'unico puzzle che soddisfa i filtri è quello escluso, viene
+        # riproposto (best-effort) invece di rispondere "nessun puzzle".
+        pz = client.get("/puzzles/next").json()
+        r = client.get(
+            "/puzzles/next",
+            params={
+                "min_rating": pz["rating"],
+                "max_rating": pz["rating"],
+                "theme": pz["themes"][0],
+                "exclude": pz["puzzle_id"],
+            },
+        )
+        data = r.json()
+        assert data["puzzle_id"] is not None
+
+    def test_themes_list(self, client):
+        r = client.get("/puzzles/themes")
+        assert r.status_code == 200
+        themes = r.json()["themes"]
+        assert themes
+        assert all("theme" in t and t["count"] >= 1 for t in themes)
+        # ordinati per frequenza decrescente
+        counts = [t["count"] for t in themes]
+        assert counts == sorted(counts, reverse=True)
+
+
+class TestExternalPuzzlesAnswer:
+    def test_full_correct_line(self, client):
+        # Un puzzle multi-mossa: risolto passo-passo con la soluzione vera.
+        pz = client.get("/puzzles/next", params={"theme": "long"}).json()
+        solution = _ext_solution(pz["puzzle_id"])
+        assert len(solution) >= 3
+        idx = 0
+        board = chess.Board(pz["fen"])
+        while True:
+            r = client.post(
+                f"/puzzles/{pz['puzzle_id']}/answer",
+                json={"move_index": idx, "move_uci": solution[idx]},
+            )
+            assert r.status_code == 200
+            d = r.json()
+            assert d["correct"] is True
+            assert d["expected_uci"] == solution[idx]
+            board.push(chess.Move.from_uci(solution[idx]))
+            if d["completed"]:
+                assert d["reply_uci"] is None
+                assert d["next_fen"] == board.fen()
+                assert idx == len(solution) - 1
+                break
+            # la contromossa avversaria è quella della linea, e next_fen è la
+            # posizione dopo mossa+risposta (di nuovo solutore al tratto)
+            assert d["reply_uci"] == solution[idx + 1]
+            assert d["reply_san"]
+            board.push(chess.Move.from_uci(d["reply_uci"]))
+            assert d["next_fen"] == board.fen()
+            assert d["next_move_index"] == idx + 2
+            idx = d["next_move_index"]
+
+    def test_wrong_but_legal_move(self, client):
+        pz = client.get("/puzzles/next").json()
+        solution = _ext_solution(pz["puzzle_id"])
+        board = chess.Board(pz["fen"])
+
+        def gives_mate(m):
+            probe = board.copy()
+            probe.push(m)
+            return probe.is_checkmate()
+
+        wrong = next(
+            (m for m in board.legal_moves if m.uci() != solution[0] and not gives_mate(m)),
+            None,
+        )
+        assert wrong is not None
+        r = client.post(
+            f"/puzzles/{pz['puzzle_id']}/answer",
+            json={"move_index": 0, "move_uci": wrong.uci()},
+        )
+        assert r.status_code == 200
+        d = r.json()
+        assert d["correct"] is False
+        assert d["completed"] is False
+        assert d["expected_uci"] == solution[0]
+        assert d["played_san"]
+        assert d["next_fen"] is None and d["reply_uci"] is None
+
+    def test_alternate_mate_accepted(self, client):
+        # Regola Lichess: un matto immediato diverso dalla mossa attesa è
+        # comunque corretto. Il puzzle candidato viene CERCATO nel bundle (non
+        # hardcoded): il test resta valido se il bundle viene rigenerato.
+        with SessionLocal() as db:
+            rows = db.execute(select(ExternalPuzzle)).scalars().all()
+        candidate = None
+        for row in rows:
+            board = chess.Board(row.fen)
+            expected = chess.Move.from_uci(row.moves_uci.split()[0])
+            for m in board.legal_moves:
+                if m == expected:
+                    continue
+                probe = board.copy()
+                probe.push(m)
+                if probe.is_checkmate():
+                    candidate = (row.id, m.uci())
+                    break
+            if candidate:
+                break
+        if candidate is None:
+            pytest.skip("nessun puzzle con matto alternativo nel bundle corrente")
+        puzzle_id, mate_uci = candidate
+        r = client.post(
+            f"/puzzles/{puzzle_id}/answer",
+            json={"move_index": 0, "move_uci": mate_uci},
+        )
+        d = r.json()
+        assert d["correct"] is True
+        assert d["completed"] is True
+        assert d["solved_by_alternate_mate"] is True
+
+    def test_illegal_move_400(self, client):
+        pz = client.get("/puzzles/next").json()
+        r = client.post(
+            f"/puzzles/{pz['puzzle_id']}/answer",
+            json={"move_index": 0, "move_uci": "a1a1"},
+        )
+        assert r.status_code == 400
+
+    def test_bad_uci_400(self, client):
+        pz = client.get("/puzzles/next").json()
+        r = client.post(
+            f"/puzzles/{pz['puzzle_id']}/answer",
+            json={"move_index": 0, "move_uci": "not-a-move"},
+        )
+        assert r.status_code == 400
+
+    def test_bad_move_index_400(self, client):
+        pz = client.get("/puzzles/next").json()
+        solution = _ext_solution(pz["puzzle_id"])
+        # indice dispari (turno avversario) e indice oltre la linea
+        for idx in (1, len(solution)):
+            r = client.post(
+                f"/puzzles/{pz['puzzle_id']}/answer",
+                json={"move_index": idx, "move_uci": solution[0]},
+            )
+            assert r.status_code == 400
+
+    def test_unknown_puzzle_404(self, client):
+        r = client.post(
+            "/puzzles/zzzzzz/answer", json={"move_index": 0, "move_uci": "e2e4"}
+        )
+        assert r.status_code == 404
+
+    def test_distinct_from_training_puzzles(self, client):
+        # I puzzle esterni non creano righe nelle tabelle Fase 4: rispondere a
+        # un puzzle Lichess non genera carte SRS né puzzle self-generated.
+        with SessionLocal() as db:
+            srs_before = len(db.execute(select(SrsCard)).scalars().all())
+            puz_before = len(db.execute(select(Puzzle)).scalars().all())
+        pz = client.get("/puzzles/next").json()
+        solution = _ext_solution(pz["puzzle_id"])
+        client.post(
+            f"/puzzles/{pz['puzzle_id']}/answer",
+            json={"move_index": 0, "move_uci": solution[0]},
+        )
+        with SessionLocal() as db:
+            assert len(db.execute(select(SrsCard)).scalars().all()) == srs_before
+            assert len(db.execute(select(Puzzle)).scalars().all()) == puz_before

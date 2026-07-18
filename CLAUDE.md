@@ -253,13 +253,30 @@ Obiettivo: trasformare l'app in un vero trainer con feedback quantitativo sui pr
 
 Obiettivo: funzionalità avanzate per rendere il training più vario e coinvolgente.
 
-| Settimana | Attività | Ore stimate | Modello suggerito |
-|-----------|----------|-------------|-------------------|
-| Sett. 30 giu | Modalità puzzle: FEN custom, mossa corretta unica, feedback immediato | ~4 ore | Opus |
-| Sett. 7 lug | Time control: clock digitale, bullet/blitz/rapid, Fischer increment | ~3 ore | Sonnet |
-| Sett. 14 lug | WebSocket: aggiornamenti live, supporto multi-tab | ~3 ore | Opus |
+| Settimana | Attività | Ore stimate | Modello suggerito | Stato |
+|-----------|----------|-------------|-------------------|-------|
+| Sett. 30 giu | Modalità puzzle: FEN custom, mossa corretta unica, feedback immediato | ~4 ore | Opus | ✅ fatto (18 luglio 2026, branch `feature/puzzle-mode-external` — vedi sotto) |
+| Sett. 7 lug | Time control: clock digitale, bullet/blitz/rapid, Fischer increment | ~3 ore | Sonnet | 🔲 |
+| Sett. 14 lug | WebSocket: aggiornamenti live, supporto multi-tab | ~3 ore | Opus | 🔲 |
 
-**Nota:** il dataset Lichess puzzles (CSV ~50 MB) richiede un import script separato e uno schema dedicato. Valutare se incluso in Fase 6 o posticipato. Puzzle da dataset esterno, distinti dai puzzle self-generated di Fase 4.
+**Nota:** il dataset Lichess puzzles (CSV ~50 MB) richiede un import script separato e uno schema dedicato. Valutare se incluso in Fase 6 o posticipato. Puzzle da dataset esterno, distinti dai puzzle self-generated di Fase 4. → **Risolto** con un bundle statico curato (vedi sotto): niente import del CSV completo, nessuno schema di import incrementale.
+
+#### Modalità puzzle (dataset Lichess esterno) — implementata 18 luglio 2026
+
+Trainer tattico su posizioni **generiche** dal Lichess puzzle database — sistema DISTINTO dai puzzle self-generated di Fase 4 (`/training/puzzles`, tabelle `puzzles`/`srs_cards`), che resta intoccato: nessuna FK verso `games`, nessuna carta SRS, nessuna scrittura DB durante la risoluzione.
+
+**Sourcing dei dati — bundle statico curato, non il CSV completo.** Il dataset ufficiale (`lichess_db_puzzle.csv.zst`, ~300 MB compressi, milioni di puzzle, licenza CC0) è sproporzionato per un'app locale single-user. `scripts/build_puzzle_bundle.py` (one-off, richiede rete + `zstandard`, NON in requirements.txt) scarica una slice iniziale del file reale via HTTP Range (~12 MB), la decomprime parzialmente, filtra per qualità (Popularity ≥ 90, NbPlays ≥ 500, RatingDeviation ≤ 100, linee ≤ 4 mosse del solutore), **valida ogni puzzle con python-chess** (FEN + legalità dell'intera linea) e campiona ~400 puzzle stratificati per fascia di rating (120 <1200, 120 1200–1599, 100 1600–1999, 60 2000+; seed fisso, build riproducibile a parità di slice). Output: `backend/data/lichess_puzzles.json` (~100 KB, versionato — provenienza e licenza in `backend/data/NOTICE.md`). A runtime l'app **non tocca mai la rete** — stesso precedente di `ENDGAME_DRILLS`. In fase di build la mossa di setup Lichess (prima mossa del campo `Moves`) viene già applicata alla FEN: nel bundle `fen` è la posizione col solutore al tratto, `initial_uci` è la mossa avversaria che l'ha generata (highlight UI) e `moves` è la sola linea di soluzione (solutore per primo, lunghezza dispari).
+
+**Schema** — tabella `external_puzzles` (migration Alembic `c41e8d5a2f90`, `create_table` puro: batch mode non necessario, nessun ALTER): `id` TEXT PK (PuzzleId Lichess), `fen`, `initial_uci`, `moves_uci` (linea spazio-separata), `rating` INT indicizzato, `themes` (spazio-separati), `lichess_url` NULL. Seed idempotente dal bundle in `db.seed_external_puzzles()` (chiamato dal lifespan e da conftest): popola solo se la tabella è vuota — per aggiornare il bundle si rigenera il JSON e si riparte da una tabella senza righe.
+
+**Endpoint** (in `main.py`, sezione "Fase 6"):
+- `GET /puzzles/next?theme=&min_rating=&max_rating=&exclude=` — puzzle casuale (ORDER BY RANDOM(), ~400 righe: costo irrilevante) filtrabile per tema (match a parola intera su `themes`, non substring) e fascia rating; `exclude` (ultimo id mostrato) evita la ripetizione immediata, **best-effort**: se l'unico match è quello escluso viene riproposto invece di rispondere "nessun puzzle". La shape pubblica **non espone mai la soluzione** — solo `solution_moves` (numero di mosse del solutore) per il progresso UI. Nessun match → `{"puzzle_id": null, "message": ...}`.
+- `GET /puzzles/themes` — temi disponibili con conteggio (aggregazione in Python), per la select del frontend.
+- `POST /puzzles/{id}/answer` `{move_index, move_uci}` — validazione **stateless**: il server ricostruisce la posizione da FEN + prefisso di soluzione (nessuno stato di sessione, nessuna scrittura DB). `move_index` è 0-based sulla linea, solo indici pari (le dispari sono le risposte avversarie auto-giocate); 400 se dispari/oltre linea/UCI malformato/mossa illegale, 404 se id inesistente. **Regola Lichess**: un matto immediato alternativo alla mossa attesa è comunque corretto (`solved_by_alternate_mate`) e completa il puzzle. Mossa giusta a linea non finita → la risposta include la contromossa (`reply_uci`/`reply_san`) e `next_fen` già con entrambe applicate (il client non applica mai mosse a una FEN da solo) + `next_move_index`. Mossa sbagliata → puzzle fallito, `expected_uci` sempre presente per mostrare la soluzione del passo.
+
+**Frontend** — quinta tab "Puzzle" (Gioca / Allenamento / **Puzzle** / Storico / Crescita), stesso pattern `showView()`, tutto nel singolo `index.html`. Stato dedicato `ext` (separato sia da `state` sia da `training`); board col renderer condiviso `buildBoardEl()` orientata su `player_to_move`, highlight della mossa avversaria di setup, interazione click-click identica alla partita live (riusa `generateMoveCandidates`/`askPromotion`). Filtri tema (select popolata da `/puzzles/themes`, etichette italiane in `EXT_THEME_LABEL`, solo temi con ≥8 puzzle) e difficoltà (4 fasce); progresso "mossa N di M" sulle linee multi-mossa, riepilogo SAN della linea giocata, punteggio di sessione (in memoria, non persistito). Fallimento → board sulla posizione dell'errore con la mossa attesa evidenziata; rientrare nella vista NON abbandona un puzzle in corso; cambiare filtro sì (non conta come tentato). Nota testuale in vista che rimanda i puzzle "dalle tue partite" alla tab Allenamento — le due funzionalità convivono senza confondersi.
+
+**Verifica** — 17 nuovi test pytest (123/123 verdi); harness jsdom (`tests/frontend_harness.mjs`, esteso con la sezione puzzle: risoluzione dell'intera linea leggendo la soluzione dal bundle — mai dall'API — exclude, fail path, select temi) contro backend isolato.
 
 ---
 

@@ -175,7 +175,66 @@ check('allenamento: lista drill (16)', $('endgame-list').querySelectorAll('.eg-r
 await waitFor(() => $('weakness-content').textContent.length > 0, 15000);
 check('allenamento: dashboard debolezze', $('weakness-content').querySelectorAll('.train-bar-row').length > 0 || $('weakness-content').textContent.includes('Nessuna'));
 
+// ---- Vista Puzzle (Fase 6 — dataset Lichess esterno) ----
+// La soluzione non è mai esposta dall'API: il harness la legge dal bundle
+// statico versionato (stessa fonte con cui il backend semina external_puzzles).
+const bundle = JSON.parse(fs.readFileSync(new URL('../backend/data/lichess_puzzles.json', import.meta.url), 'utf8'));
+const solOf = id => bundle.find(p => p.id === id).moves;
+ev("showView('puzzles')");
+await waitFor(() => !ev('ext.loading') && ev('!!ext.puzzle'), 15000);
+check('puzzle: caricato dal bundle', ev('!!ext.puzzle'), ev('ext.puzzle && ext.puzzle.puzzle_id'));
+check('puzzle: board renderizzata (64 caselle)', window.document.querySelectorAll('#ext-board .square').length === 64);
+check('puzzle: meta mostra il rating', $('ext-meta').textContent.includes(String(ev('ext.puzzle.rating'))));
+await waitFor(() => $('ext-theme').options.length > 1, 10000);
+check('puzzle: select temi popolata', $('ext-theme').options.length > 1, $('ext-theme').options.length + ' opzioni');
+
+// happy path: risolvi l'intera linea con la soluzione vera
+let solvedId = ev('ext.puzzle.puzzle_id');
+{
+  const sol = solOf(solvedId);
+  for (let i = 0; i < sol.length && !ev('ext.finished'); i += 2) {
+    await ev(`submitExtAnswer('${sol[i]}')`);
+  }
+}
+check('puzzle: risolto con la soluzione', ev('ext.finished') && !ev('ext.failed'));
+check('puzzle: feedback ok', $('ext-feedback').classList.contains('ok'), $('ext-feedback').textContent);
+check('puzzle: punteggio sessione 1/1', ev('ext.solved') === 1 && ev('ext.attempted') === 1);
+
+// prossimo puzzle: exclude evita la ripetizione immediata
+await ev('loadExtPuzzle()');
+await waitFor(() => !ev('ext.loading') && ev('!!ext.puzzle'), 15000);
+check('puzzle: exclude evita ripetizione', ev('ext.puzzle.puzzle_id') !== solvedId, ev('ext.puzzle.puzzle_id'));
+
+// fail path: prova mosse candidate diverse dall'attesa finché una legale
+// chiude il puzzle (le illegali vengono respinte con 400 e non lo terminano)
+{
+  const expected = solOf(ev('ext.puzzle.puzzle_id'))[0];
+  const cands = JSON.parse(ev(`JSON.stringify((() => {
+    const map = fenToMap(ext.fen); const out = [];
+    for (const sq of Object.keys(map)) {
+      const p = map[sq];
+      const own = ext.puzzle.player_to_move === 'white' ? p === p.toUpperCase() : p === p.toLowerCase();
+      if (own) for (const m of generateMoveCandidates(ext.fen, sq, ext.puzzle.player_to_move))
+        out.push(m.from + m.to + (m.promo ? 'q' : ''));
+    }
+    return out;
+  })())`));
+  for (const uci of cands) {
+    if (uci === expected) continue;
+    await ev(`submitExtAnswer('${uci}')`);
+    if (ev('ext.finished')) break;
+  }
+  if (ev('ext.altMate')) {
+    console.log('SKIP  puzzle: fail path (matto alternativo trovato per caso)');
+  } else {
+    check('puzzle: mossa sbagliata -> fallito', ev('ext.finished') && ev('ext.failed'));
+    check('puzzle: feedback ko con mossa attesa', $('ext-feedback').classList.contains('ko')
+      && $('ext-feedback').textContent.includes(expected.slice(0, 2)), $('ext-feedback').textContent);
+    check('puzzle: punteggio sessione 1/2', ev('ext.solved') === 1 && ev('ext.attempted') === 2);
+  }
+}
 // drill di finali: avvio dalla vista Allenamento -> ruota nella vista Gioca
+ev("showView('training')");
 await waitFor(() => ev('endgames.length') > 0, 5000);
 await ev("startEndgameDrill(endgames.find(d => d.id === 'philidor'))");
 check('drill: partita creata con FEN custom', ev('state.fen').startsWith('8/8/8/3k4'), ev('state.fen'));
