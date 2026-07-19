@@ -33,6 +33,14 @@ const dom = new JSDOM(html, {
     };
     window.Element.prototype.scrollIntoView = () => {};
     window.fetch = (...a) => fetch(...a); // fetch reale di Node contro il backend live
+    // WebSocket inerte: jsdom non lo implementa. Nessun evento automatico
+    // (nessun onclose → nessuna riconnessione), così l'harness può invocare a
+    // mano gameSocket.onmessage per esercitare il dedup del client.
+    window.WebSocket = class {
+      constructor(url){ this.url = url; this.readyState = 1; }
+      send(){}
+      close(){ this.readyState = 3; }
+    };
   },
 });
 const { window } = dom;
@@ -322,6 +330,39 @@ check('drill: partita creata con FEN custom', ev('state.fen').startsWith('8/8/8/
 check('drill: player = lato al tratto (nero)', ev('state.playerColor') === 'black');
 check('drill: vista Gioca attiva', $('view-play').style.display === 'flex');
 check('drill: status mostra obiettivo', $('status').textContent.includes('Philidor'), $('status').textContent);
+
+// ---- WebSocket dedup: un game-over deve bypassare il dedup ply-based ----
+// Regressione (intersezione time-control × websocket): con la bandierina la
+// mossa che fa scattare il flag non viene mai applicata, quindi il ply non
+// avanza. Una tab non-attiva riceve la notifica ma il dedup basato sul ply la
+// scarterebbe SE non fosse per il segnale is_game_over. Verifica il vero
+// handler onmessage: soppresso a ply invariato senza game-over, forzato con.
+ev("state.playerColor='white'; state.engineElo=400; setup.time='none';");
+await ev('startGame()');
+check('ws-dedup: socket mock connesso dopo startGame', ev('!!gameSocket'),
+  ev('gameSocket && gameSocket.constructor && gameSocket.constructor.name'));
+const wsGid = ev('state.gameId');
+ev('state.thinking = false; state.isGameOver = false;');
+const wsBasePly = ev('state.moveHistory.length');
+// Spia fetch: conta solo i GET di stato /game/<id> (esclude hint/threats che
+// updateState innesca a valle, irrilevanti per il dedup).
+ev(`window.__wsFetches = []; window.__realFetch = window.fetch;
+    window.fetch = (u, ...r) => {
+      const s = String(u);
+      if (s.includes('/game/${wsGid}') && !s.includes('/hint') && !s.includes('/threats')) window.__wsFetches.push(s);
+      return window.__realFetch(u, ...r);
+    };`);
+// Caso 1: notifica NON game-over con ply invariato → soppressa (nessun refetch).
+ev(`gameSocket.onmessage({ data: JSON.stringify({ type:'state', game_id:'${wsGid}', ply:${wsBasePly}, is_game_over:false }) })`);
+await sleep(250);
+check('ws-dedup: notifica non-over a ply invariato viene soppressa',
+  ev('window.__wsFetches.length') === 0, ev('JSON.stringify(window.__wsFetches)'));
+// Caso 2: notifica game-over con ply invariato → NON soppressa (refetch forzato).
+ev(`gameSocket.onmessage({ data: JSON.stringify({ type:'state', game_id:'${wsGid}', ply:${wsBasePly}, is_game_over:true }) })`);
+await waitFor(() => ev('window.__wsFetches.length') >= 1, 4000);
+check('ws-dedup: notifica game-over a ply invariato forza il refetch',
+  ev('window.__wsFetches.length') >= 1, ev('JSON.stringify(window.__wsFetches)'));
+ev('window.fetch = window.__realFetch;');
 
 const fails = results.filter(r => !r.ok).length;
 console.log('\n' + (results.length - fails) + '/' + results.length + ' checks ok');
