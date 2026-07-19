@@ -101,6 +101,69 @@ check('analisi: sezione visibile', $('analysis').classList.contains('visible'));
 check('analisi: eval chart SVG', $('eval-chart').innerHTML.includes('<svg'));
 check('analisi: tabella due colonne', window.document.querySelectorAll('.analysis-row').length > 0);
 
+// ---- Scacchiera ridimensionabile (drag-to-resize) ----
+// jsdom non risolve var()/calc() nel layout, quindi: i binding CSS si
+// verificano sul sorgente (html), il comportamento (clamp, drag, re-render)
+// via eventi DOM reali sulle funzioni vere.
+check('resize: maniglia presente sulla board live', !!window.document.querySelector('#board-wrapper .board-resize'));
+check('resize: cursor nwse-resize sulla maniglia', /\.board-resize\s*\{[^}]*nwse-resize/s.test(html));
+check('resize: width e height entrambe legate a --board-size (board sempre quadrata)',
+  /\.board\s*\{[^}]*width:\s*var\(--board-size\)/s.test(html) && /\.board\s*\{[^}]*height:\s*var\(--board-size\)/s.test(html));
+check('resize: celle della griglia in fr, non px fissi (scalano col container)',
+  /\.board\s*\{[^}]*repeat\(8,\s*1fr\)/s.test(html) && !/\.board\s*\{[^}]*repeat\(8,\s*60px\)/s.test(html));
+check('resize: eval bar segue --board-size', /\.eval-bar\s*\{[^}]*height:\s*var\(--board-size\)/s.test(html));
+check('resize: default 484px (layout storico invariato)', ev('boardSize') === 484);
+
+const grip = () => window.document.querySelector('#board-wrapper .board-resize');
+const drag = (dx, dy) => {
+  grip().dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: 500, clientY: 500 }));
+  window.dispatchEvent(new window.MouseEvent('mousemove', { clientX: 500 + dx, clientY: 500 + dy }));
+  window.dispatchEvent(new window.MouseEvent('mouseup', {}));
+};
+drag(100, 100);
+check('resize: drag diagonale +100 -> 584', ev('boardSize') === 584, 'boardSize=' + ev('boardSize'));
+check('resize: variabile CSS aggiornata sul <html>',
+  window.document.documentElement.style.getPropertyValue('--board-size') === '584px',
+  window.document.documentElement.style.getPropertyValue('--board-size'));
+drag(-2000, -2000);
+check('resize: clamp al minimo 320', ev('boardSize') === 320, 'boardSize=' + ev('boardSize'));
+drag(2000, 2000);
+check('resize: clamp al massimo 800', ev('boardSize') === 800, 'boardSize=' + ev('boardSize'));
+drag(-316, -316);   // 800 - 316 = 484: ripristina il default per il resto dell'harness
+check('resize: drag di ritorno al default', ev('boardSize') === 484, 'boardSize=' + ev('boardSize'));
+
+// Dopo il resize la pipeline di render e l'interazione restano intatte:
+// re-render completo + selezione pezzo con click DOM reale.
+ev('renderBoard()');
+check('resize: re-render post-resize produce 64 caselle + maniglia',
+  window.document.querySelectorAll('#board-wrapper .square').length === 64 && !!grip());
+window.document.querySelector('#board-wrapper .square[data-sq="d2"]').click();
+await waitFor(() => ev("state.selectedSq === 'd2'"), 3000);
+check('resize: click su casella funziona ancora (pezzo selezionato)', ev("state.selectedSq === 'd2'"));
+window.document.querySelector('#board-wrapper .square[data-sq="d2"]').click();  // deseleziona
+
+// Frecce hint dopo un resize: l'arrow-layer disegna in unità-board (viewBox
+// 0 0 8 8, layer al 100% del container), quindi le coordinate di una freccia
+// devono coincidere con sqToXY a QUALSIASI dimensione della board.
+drag(60, 60);   // resize di nuovo (544) prima di disegnare le frecce
+ev("state.assisted = true; state.hint = { eval_cp: 0, lines: [{ move_uci: 'e2e4', move_san: 'e4', score_cp: 0 }] }; renderArrows();");
+const arrowLayer = window.document.querySelector('#board-wrapper .arrow-layer');
+check('resize: arrow-layer presente dopo il resize', !!arrowLayer);
+check('resize: viewBox in unità-board (0 0 8 8), indipendente dai px', arrowLayer.getAttribute('viewBox') === '0 0 8 8');
+{
+  const a = JSON.parse(ev("JSON.stringify(sqToXY('e2'))"));
+  const b = JSON.parse(ev("JSON.stringify(sqToXY('e4'))"));
+  const line = arrowLayer.querySelector('line');
+  // e2->e4 è verticale: x costante = colonna della casella, y dal centro e2 verso e4
+  check('resize: freccia ancora allineata alle caselle giuste (e2->e4)',
+    !!line && Number(line.getAttribute('x1')) === a.x && Number(line.getAttribute('x2')) === b.x
+    && Math.abs(Number(line.getAttribute('y1')) - (a.y - 0.32)) < 1e-9,
+    line ? `x1=${line.getAttribute('x1')} atteso ${a.x}` : 'nessuna line');
+}
+ev('state.assisted = false; state.hint = null; renderArrows();');
+drag(-60, -60); // ripristina 484
+check('resize: stato ripristinato per il resto dell\'harness', ev('boardSize') === 484);
+
 // ---- Time control (Fase 6): preset selector, digital clock, bandierina ----
 ev('openSetup()');
 check('time control: 7 preset nel selettore (incl. "Nessun limite")',
