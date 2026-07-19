@@ -162,11 +162,18 @@ def _notify_state(game_id: str, game: dict) -> None:
     """Notifica alle tab collegate che lo stato della partita è cambiato. `ply`
     (mosse totali) permette al client di scartare l'eco della propria mossa e i
     messaggi stantii — vedi docs/websocket-live.md."""
+    # is_game_over via _game_over_info (non board.is_game_over()): un esito per
+    # bandierina (timeout) NON è deducibile dalla board — la mossa che fa
+    # scattare il flag non viene mai applicata (vedi _debit_clock). Se qui
+    # riportassimo board.is_game_over() una partita finita a tempo notificherebbe
+    # is_game_over=False e, non essendo avanzato il ply (nessuna mossa aggiunta),
+    # il dedup ply-based del client scarterebbe la notifica: le altre tab non
+    # vedrebbero mai la fine partita. Vedi docs/websocket-live.md.
     ws_manager.notify(game_id, {
         "type": "state",
         "game_id": game_id,
         "ply": len(game["move_objects"]),
-        "is_game_over": game["board"].is_game_over(),
+        "is_game_over": _game_over_info(game) is not None,
     })
 
 class NewGameRequest(BaseModel):

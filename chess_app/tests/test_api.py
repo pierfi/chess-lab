@@ -1996,6 +1996,27 @@ class TestTimeControl:
         r = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
         assert r.status_code == 400
 
+    def test_replay_of_flagged_game_is_consistent(self, client):
+        """Intersezione time-control × replay: la mossa che fa scattare la
+        bandierina non viene mai applicata, quindi non esiste una riga moves per
+        essa. Il replay deve restare coerente (len(fens) == len(moves)+1, nessun
+        crash, ultimo FEN = posizione reale) e la partita risultare finita."""
+        data = self._new_timed_game(client, initial=15, increment=0)
+        gid = data["game_id"]
+        # Player fa una mossa reale (persistita), poi flagga sulla successiva.
+        games[gid]["last_ready_at"] = time.monotonic()
+        client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+        games[gid]["clock"]["white"] = 0
+        r = client.post("/game/move", json={"game_id": gid, "move_uci": "d2d4"})
+        assert r.json()["game_over"]["reason"] == "timeout"
+
+        replay = client.get(f"/game/{gid}/replay").json()
+        # e2e4 (player) + eventuale risposta engine, ma NON la mossa flaggata d2d4.
+        assert "d2d4" not in [m["uci"] for m in replay["moves"]]
+        assert len(replay["fens"]) == len(replay["moves"]) + 1
+        assert replay["fens"][-1] == games[gid]["board"].fen()
+        assert isinstance(replay["pgn"], str) and replay["pgn"]
+
     def test_endgame_drill_has_no_time_control(self, client):
         """I drill di finali non espongono time_control — restano sempre non
         a tempo, come import."""
@@ -2068,6 +2089,55 @@ class TestWebSocketLive:
         connette senza errore (non riceverà mai nulla)."""
         with client.websocket_connect("/ws/game/deadbeef") as ws:
             assert ws is not None
+
+    def test_flag_notifies_with_is_game_over_true(self, client):
+        """Regressione (intersezione time-control × websocket): quando la
+        partita finisce per bandierina del player la mossa che fa scattare il
+        flag NON viene applicata — il ply non avanza. Se la notifica riportasse
+        is_game_over=False (board.is_game_over() è False su una partita flaggata)
+        il dedup ply-based del client scarterebbe il messaggio e le altre tab
+        non vedrebbero mai la fine partita. La notifica DEVE dire is_game_over=True."""
+        r = client.post("/game/new", json={
+            "player_color": "white", "engine_elo": 800,
+            "time_control": {"initial_seconds": 15, "increment_seconds": 0},
+        })
+        gid = r.json()["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid}") as ws:
+            games[gid]["clock"]["white"] = 0  # forza la bandierina sulla prossima mossa
+            resp = client.post("/game/move", json={"game_id": gid, "move_uci": "e2e4"})
+            assert resp.status_code == 200
+            assert resp.json()["game_over"]["reason"] == "timeout"
+            msg = ws.receive_json()
+            assert msg["type"] == "state"
+            assert msg["game_id"] == gid
+            # La mossa flaggata non è applicata: ply resta 0 (come le altre tab).
+            assert msg["ply"] == 0
+            # Il campo che permette al client di superare il dedup ply-based.
+            assert msg["is_game_over"] is True
+
+    def test_checkmate_on_timed_game_notifies(self, client):
+        """Regressione: un game-over NON-timeout (matto) su una partita a tempo
+        notifica comunque con is_game_over=True. Qui il ply avanza (la mossa di
+        matto viene applicata), ma verifichiamo che il flag di fine partita sul
+        canale WS resti coerente col nuovo _notify_state basato su _game_over_info."""
+        r = client.post("/game/new", json={
+            "player_color": "white", "engine_elo": 800,
+            "time_control": {"initial_seconds": 60, "increment_seconds": 0},
+        })
+        gid = r.json()["game_id"]
+        with client.websocket_connect(f"/ws/game/{gid}") as ws:
+            # Posizione con matto in 1 per il bianco: Ra1-a8# (matto della prima
+            # traversa, il re nero è soffocato dai propri pedoni f7/g7/h7).
+            games[gid]["board"] = chess.Board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1")
+            games[gid]["move_objects"] = []
+            games[gid]["last_ready_at"] = time.monotonic()
+            resp = client.post("/game/move", json={"game_id": gid, "move_uci": "a1a8"})
+            assert resp.status_code == 200
+            assert resp.json()["is_game_over"] is True
+            msg = ws.receive_json()
+            assert msg["type"] == "state"
+            assert msg["is_game_over"] is True
+            assert msg["ply"] == 1
 
 
 # -------------------------------------------------------------------

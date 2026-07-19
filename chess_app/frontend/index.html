@@ -2092,7 +2092,12 @@ function openGameSocket() {
     // aggiornerà lo stato da sé — ignoro la notifica. Le altre tab (thinking
     // false) rifetchano solo se il ply notificato supera quello già applicato.
     if (state.thinking) return;
-    if (msg.ply <= state.moveHistory.length) return;
+    // Un game-over deve SEMPRE far rifetchare: con la bandierina (timeout) la
+    // mossa che fa scattare il flag non viene mai applicata, quindi il ply non
+    // avanza e il dedup ply-based nasconderebbe la fine partita. Si rifetcha
+    // solo se questa tab non sa ancora che è finita (evita refetch ripetuti).
+    const gameOverSignal = msg.is_game_over && !state.isGameOver;
+    if (msg.ply <= state.moveHistory.length && !gameOverSignal) return;
     fetch(API + '/game/' + msg.game_id)
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (d && state.gameId === d.game_id) updateState(d); })
