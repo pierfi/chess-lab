@@ -1,0 +1,145 @@
+[
+  {
+    "id": "caro-kann-idee",
+    "title": "La Difesa Caro-Kann: la regola dell'alfiere libero",
+    "category": "opening",
+    "level": "beginner",
+    "orientation": "white",
+    "summary": "La struttura solida della Caro-Kann e la regola d'oro: sviluppare l'alfiere di donna prima di chiudergli la strada con e6.",
+    "intro": "La Caro-Kann è una delle difese più solide contro 1.e4: il Nero prepara d5 sostenendolo con il pedone c invece che con il cavallo, in modo da poter aprire per tempo la diagonale del proprio alfiere di donna. L'idea chiave è la regola d'oro delle strutture con pedone e6: sviluppa l'alfiere di donna FUORI dalla catena pedonale prima di giocare e6, altrimenti quell'alfiere resta chiuso in casa per il resto della partita — il difetto cronico della Difesa Francese che la Caro-Kann evita fin dall'inizio.",
+    "start_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "line": [
+      {
+        "san": "e4",
+        "mode": "show",
+        "comment": "Il Bianco occupa il centro e apre le diagonali per l'alfiere di re e per la donna."
+      },
+      {
+        "san": "c6",
+        "mode": "show",
+        "comment": "Il Nero gioca la Caro-Kann: prepara d5 sostenendolo con un pedone, senza bloccare la strada al proprio alfiere di donna come accadrebbe giocando subito e6."
+      },
+      {
+        "san": "d4",
+        "mode": "show",
+        "comment": "Il Bianco costruisce un centro pieno di pedoni, guadagnando spazio."
+      },
+      {
+        "san": "d5",
+        "mode": "show",
+        "comment": "Il Nero sfida subito il centro: il pedone c6 sostiene d5, quindi il Bianco non può vincere materiale in questo scontro centrale."
+      },
+      {
+        "san": "Nc3",
+        "mode": "show",
+        "comment": "Il Bianco sviluppa il cavallo e difende il pedone e4, mantenendo la tensione al centro."
+      },
+      {
+        "san": "dxe4",
+        "mode": "show",
+        "comment": "Il Nero risolve la tensione catturando al centro."
+      },
+      {
+        "san": "Nxe4",
+        "mode": "show",
+        "comment": "Il Bianco ricattura: il cavallo prende una posizione centralizzata, ma resta esposto a una mossa di tempo del Nero."
+      },
+      {
+        "san": "Bf5",
+        "mode": "play",
+        "prompt": "Trova la mossa tematica della Caro-Kann: sviluppa l'alfiere di donna sulla diagonale libera PRIMA di chiudergli la strada con e6.",
+        "comment": "Bf5! Questa è la regola d'oro della Caro-Kann: l'alfiere esce libero finché il pedone e non è ancora su e6. Rimandare questa mossa di un solo tempo può bastare a chiudere l'alfiere dentro la propria struttura per il resto della partita, esattamente il problema che affligge il Nero nella Difesa Francese."
+      },
+      {
+        "san": "Ng3",
+        "mode": "show",
+        "comment": "Il Bianco attacca l'alfiere, guadagnando un tempo di sviluppo."
+      },
+      {
+        "san": "Bg6",
+        "mode": "show",
+        "comment": "Il Nero ritira l'alfiere mantenendo la diagonale: la missione della Caro-Kann è compiuta, e ora può completare lo sviluppo con e6 senza più alcun problema per l'alfiere."
+      }
+    ],
+    "related_drill_id": null
+  },
+  {
+    "id": "opposizione-re-pedone",
+    "title": "Re e pedone contro re: la casa chiave dell'opposizione",
+    "category": "endgame",
+    "level": "beginner",
+    "orientation": "white",
+    "summary": "Come il re guida il pedone alla promozione conquistando per primo la casa giusta: la regola delle case chiave e l'opposizione.",
+    "intro": "Nei finali di solo re e pedone, il pedone quasi mai promuove da solo: serve che il proprio re arrivi per primo su una delle 'case chiave' davanti a lui. Se il re del lato più forte occupa in tempo una di queste case, il pedone promuove qualunque cosa faccia il re avversario; altrimenti la difesa può bastare per il pareggio. In questa posizione il Bianco deve resistere alla tentazione di pensare subito al pedone e cercare invece la casa giusta con il re: è il concetto di opposizione applicato al finale di pedone.",
+    "start_fen": "4k3/8/8/4K3/4P3/8/8/8 w - - 0 1",
+    "line": [
+      {
+        "san": "Ke6",
+        "mode": "play",
+        "prompt": "Non pensare al pedone per ora: trova la casa chiave per il tuo re, quella che garantisce la promozione qualunque cosa faccia il Nero.",
+        "comment": "Ke6! Il re bianco occupa una delle tre case chiave davanti al pedone (d6, e6, f6): da qui la promozione è garantita, qualunque cosa faccia il Nero. Una mossa di re che non prende una di queste case chiave — per esempio Kd5 o Kf5 — lascerebbe invece soltanto la patta."
+      },
+      {
+        "san": "Kf8",
+        "mode": "show",
+        "comment": "Il Nero tenta di restare vicino al pedone, ma il re bianco ha già preso il controllo della situazione."
+      },
+      {
+        "san": "Kf6",
+        "mode": "show",
+        "comment": "Il Bianco segue il re nero, mantenendo sempre una casa chiave davanti al pedone."
+      },
+      {
+        "san": "Kg8",
+        "mode": "show",
+        "comment": "Il Nero non ha una vera difesa: ogni mossa di re lascia strada libera al pedone."
+      },
+      {
+        "san": "e5",
+        "mode": "show",
+        "comment": "Ora, e solo ora, il pedone avanza: il re bianco lo scorta e continua a impedirgli di essere fermato."
+      },
+      {
+        "san": "Kf8",
+        "mode": "show",
+        "comment": "Il Nero torna verso il pedone, ma resta sempre in ritardo di una mossa."
+      },
+      {
+        "san": "e6",
+        "mode": "show",
+        "comment": "Il pedone continua ad avanzare, sempre un passo davanti al re nero."
+      },
+      {
+        "san": "Ke8",
+        "mode": "show",
+        "comment": "L'unico modo per restare davanti al pedone, ma il re bianco ha già preso il controllo della corsa."
+      },
+      {
+        "san": "e7",
+        "mode": "show",
+        "comment": "Il pedone arriva alla settima traversa, a un passo dalla promozione."
+      },
+      {
+        "san": "Kd7",
+        "mode": "show",
+        "comment": "Il re nero è costretto a cedere la casa davanti al pedone."
+      },
+      {
+        "san": "Kf7",
+        "mode": "show",
+        "comment": "Il re bianco protegge il pedone e gli apre definitivamente la strada verso la promozione."
+      },
+      {
+        "san": "Kd6",
+        "mode": "show",
+        "comment": "Il Nero non può più fare nulla per impedire la promozione."
+      },
+      {
+        "san": "e8=Q",
+        "mode": "show",
+        "comment": "Il pedone promuove a donna: il piano iniziato con Ke6, la conquista della casa chiave, ha vinto la partita."
+      }
+    ],
+    "related_drill_id": null
+  }
+]
