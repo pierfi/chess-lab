@@ -36,6 +36,7 @@ try:
         utcnow,
     )
     from backend.eco_book import match_opening
+    from backend.lessons import get_lesson, list_lessons
 except ModuleNotFoundError:  # pragma: no cover - solo per uvicorn da backend/
     from db import (
         AnalysisResult,
@@ -51,6 +52,7 @@ except ModuleNotFoundError:  # pragma: no cover - solo per uvicorn da backend/
         utcnow,
     )
     from eco_book import match_opening
+    from lessons import get_lesson, list_lessons
 
 
 @asynccontextmanager
@@ -2195,3 +2197,27 @@ def answer_external_puzzle(puzzle_id: str, req: ExternalPuzzleAnswerRequest):
         "next_fen": board.fen(),
         "next_move_index": next_move_index,
     }
+
+# =====================================================================
+# Lezioni di teoria (Fase 4 — Allenamento). Contenuto statico curato a mano
+# in backend/data/lessons.json, caricato/validato una volta all'import da
+# backend/lessons.py (docs/theory-lessons-design.md). Read-only, nessuna
+# scrittura DB, nessun tracking progressi in v1 (§4 del design doc).
+# =====================================================================
+
+@app.get("/training/lessons")
+def training_lessons_list():
+    """Metadati delle lezioni disponibili (id/title/category/level/summary).
+    Non include mai line/fens — quelli sono nel dettaglio, per tenere leggera
+    la lista."""
+    return {"lessons": list_lessons()}
+
+@app.get("/training/lessons/{lesson_id}")
+def training_lesson_detail(lesson_id: str):
+    """Dettaglio di una lezione: fens[] (N+1, espansi da python-chess a
+    caricamento — vedi backend/lessons.py) e line[] con uci derivato dal SAN
+    autorato. 404 se l'id non esiste."""
+    lesson = get_lesson(lesson_id)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    return lesson
