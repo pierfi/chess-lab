@@ -1,0 +1,62 @@
+[
+  {
+    "id": "matto-prima-traversa",
+    "title": "Il matto della prima traversa: il re soffocato dai suoi pedoni",
+    "category": "tactic",
+    "level": "beginner",
+    "orientation": "white",
+    "summary": "Il motivo che punisce il re arroccato senza via di fuga: una torre invade l'ottava traversa e dà matto perché i pedoni imprigionano il loro stesso re.",
+    "intro": "Dopo l'arrocco il re sta al sicuro dietro i suoi pedoni f7, g7 e h7 — ma quello stesso muro, se manca una casa di fuga (la cosiddetta 'luft'), può diventare una prigione. Se una torre avversaria riesce a raggiungere l'ottava traversa senza essere catturata, il re non ha dove scappare: è il matto della prima traversa. Qui il Bianco lo mostra in tre mosse.",
+    "start_fen": "r5k1/1pp2ppp/8/8/8/8/P4PPP/5RK1 w - - 0 1",
+    "line": [
+      { "san": "Re1", "mode": "show",
+        "comment": "Il Bianco prende la colonna 'e', che è aperta: è l'autostrada verso l'ottava traversa, dove il re nero è rinchiuso dietro i suoi stessi pedoni f7, g7 e h7." },
+      { "san": "Rxa2", "mode": "show",
+        "comment": "Il Nero cattura un pedone, ma per farlo la torre abbandona l'ottava traversa e finisce lontanissima. Senza una casa di fuga per il proprio re, questa distrazione è fatale: la sua unica difesa della traversa se n'è andata." },
+      { "san": "Re8#", "mode": "play",
+        "prompt": "La torre bianca ha via libera sulla colonna 'e' e il re nero è murato dai suoi pedoni. Trova la mossa che invade l'ottava traversa e dà scaccomatto.",
+        "comment": "Re8#! La torre irrompe sull'ottava traversa con scacco. Il re non ha scampo: le case f8 e h8 sono controllate dalla torre lungo la traversa, mentre f7, g7 e h7 sono bloccate dai suoi stessi pedoni. Nessun pezzo nero può interporsi o catturare la torre. Questo è il matto della prima traversa: il re muore soffocato dalla propria difesa. Morale: quando puoi, crea una 'luft' con h6 o g6 prima che sia tardi." }
+    ],
+    "related_drill_id": null
+  },
+  {
+    "id": "lucena-ponte",
+    "title": "La tecnica del ponte di Lucena",
+    "category": "endgame",
+    "level": "intermediate",
+    "orientation": "white",
+    "summary": "Il finale di torre più famoso: con il pedone in settima e il re davanti, il Bianco vince costruendo un 'ponte' con la torre per schermare il re dagli scacchi.",
+    "intro": "La posizione di Lucena è il finale di torre che ogni giocatore deve conoscere: pedone in settima traversa, il re forte davanti al pedone, l'altra torre pronta a dare una raffica di scacchi. Il problema è che, appena il re bianco prova a uscire per far promuovere il pedone, viene tempestato di scacchi e non trova riparo. La soluzione, vecchia di cinque secoli, è 'costruire il ponte': piazzare la torre su una traversa da cui potrà interporsi e bloccare lo scacco decisivo. Questa lezione ti spiega il perché di ogni mossa; il drill omonimo ti farà poi giocare la tecnica contro l'engine.",
+    "start_fen": "1K1k4/1P6/8/8/8/8/r7/5R2 w - - 0 1",
+    "line": [
+      { "san": "Rd1+", "mode": "show",
+        "comment": "Prima di tutto uno scacco utile: la torre respinge il re nero, allontanandolo dal pedone. Ogni colonna di distanza guadagnata renderà più difficile al Nero disturbare il re bianco." },
+      { "san": "Ke7", "mode": "show",
+        "comment": "Il re nero deve togliersi dalla colonna 'd'. Non può andare in c8 o c7, controllate dal re bianco, quindi arretra sulla colonna 'e', un passo più lontano dall'azione." },
+      { "san": "Rd4", "mode": "play",
+        "prompt": "Questa è la mossa che dà il nome alla tecnica. Con il pedone in settima traversa, porta la torre sulla QUARTA traversa: non per dare scacco, ma per prepararsi a fare da 'ponte' più tardi. Trovala.",
+        "comment": "Rd4! Il segreto di Lucena. La torre non attacca nulla: si mette in posizione di riparo. Quando il re bianco uscirà e verrà inseguito dagli scacchi, questa torre scenderà a bloccarne uno. La quarta traversa è la distanza giusta proprio perché il pedone è in settima." },
+      { "san": "Ra1", "mode": "show",
+        "comment": "Il Nero si prepara a inseguire il re bianco con scacchi da dietro e di lato: è la sua unica risorsa per ritardare la promozione." },
+      { "san": "Kc7", "mode": "show",
+        "comment": "Ora il re bianco esce allo scoperto per scortare il pedone verso la casa di promozione. Cominciano gli scacchi." },
+      { "san": "Rc1+", "mode": "show",
+        "comment": "Scacco lungo la colonna 'c'. Il re bianco deve avanzare senza mai allontanarsi troppo dal pedone." },
+      { "san": "Kb6", "mode": "show",
+        "comment": "Il re si avvicina alla propria torre in d4: è lì, sulla quarta traversa, che verrà costruito il ponte." },
+      { "san": "Rb1+", "mode": "show",
+        "comment": "Ancora scacco, ora sulla colonna 'b'. Il Nero non ha altro modo di frenare il Bianco: continua a controllare a distanza." },
+      { "san": "Kc6", "mode": "show",
+        "comment": "Il re bianco continua a zigzagare verso la torre-ponte, senza mai perdere di vista né il pedone né la casa b8." },
+      { "san": "Rc1+", "mode": "show",
+        "comment": "Scacco di nuovo. Ma siamo ormai a un passo dal punto in cui questi scacchi finiranno per sempre." },
+      { "san": "Kb5", "mode": "show",
+        "comment": "Il re raggiunge la quinta traversa, proprio sopra la torre in d4. Adesso il ponte è pronto a scattare." },
+      { "san": "Rb1+", "mode": "show",
+        "comment": "L'ultimo scacco lungo la colonna 'b'. Guarda ora come la torre in d4, messa lì tante mosse fa, risolve di colpo la partita." },
+      { "san": "Rb4", "mode": "show",
+        "comment": "Rb4! Il ponte. La torre si interpone e blocca lo scacco riparando il re. Se il Nero cattura con Rxb4+, dopo Kxb4 il pedone corre indisturbato a promuovere; se non cattura, il Bianco gioca semplicemente b8=D. In entrambi i casi il pedone diventa donna: la tecnica di Lucena ha vinto. Ora prova a giocarla tu contro l'engine nel drill collegato." }
+    ],
+    "related_drill_id": "lucena"
+  }
+]
