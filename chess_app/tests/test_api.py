@@ -2381,3 +2381,70 @@ class TestExternalPuzzlesAnswer:
         with SessionLocal() as db:
             assert len(db.execute(select(SrsCard)).scalars().all()) == srs_before
             assert len(db.execute(select(Puzzle)).scalars().all()) == puz_before
+
+
+class TestTheoryLessons:
+    """Lezioni di teoria (docs/theory-lessons-design.md), read-only, contenuto
+    statico in backend/data/lessons.json. NON assumere un numero esatto di
+    lezioni: altri agenti autorano fragment separati che verranno concatenati
+    a questo file in seguito (vedi istruzioni del task) — si verifica solo
+    che i due id seed siano presenti tra quelli caricati."""
+
+    def test_list_contains_seed_lessons_with_metadata_shape(self, client):
+        r = client.get("/training/lessons")
+        assert r.status_code == 200
+        lessons = r.json()["lessons"]
+        by_id = {l["id"]: l for l in lessons}
+        for lesson_id in ("italiana-idee", "forchetta-cavallo"):
+            assert lesson_id in by_id
+            entry = by_id[lesson_id]
+            # Shape metadati soli: le chiavi attese, non di più (niente
+            # line/fens/start_fen nella lista).
+            assert set(entry.keys()) == {"id", "title", "category", "level", "summary"}
+            assert entry["category"] in ("opening", "tactic", "endgame")
+            assert entry["level"] in ("beginner", "intermediate")
+            assert entry["title"]
+            assert entry["summary"]
+
+    def test_detail_expands_fens_to_line_length_plus_one(self, client):
+        r = client.get("/training/lessons/italiana-idee")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["fens"]) == len(data["line"]) + 1
+        assert data["fens"][0] == data["start_fen"]
+
+        r2 = client.get("/training/lessons/forchetta-cavallo")
+        data2 = r2.json()
+        assert len(data2["fens"]) == len(data2["line"]) + 1
+
+    def test_detail_uci_matches_python_chess_from_san(self, client):
+        r = client.get("/training/lessons/italiana-idee")
+        data = r.json()
+        board = chess.Board(data["start_fen"])
+        for i, step in enumerate(data["line"]):
+            expected_move = board.parse_san(step["san"])
+            assert step["uci"] == expected_move.uci()
+            assert step["ply"] == i + 1
+            board.push(expected_move)
+            assert data["fens"][i + 1] == board.fen()
+
+    def test_unknown_lesson_404(self, client):
+        r = client.get("/training/lessons/does-not-exist")
+        assert r.status_code == 404
+
+    def test_play_step_has_prompt_show_step_does_not(self, client):
+        r = client.get("/training/lessons/forchetta-cavallo")
+        data = r.json()
+        play_steps = [s for s in data["line"] if s["mode"] == "play"]
+        show_steps = [s for s in data["line"] if s["mode"] == "show"]
+        assert play_steps  # la lezione ha almeno uno step "play"
+        assert show_steps  # e almeno uno step "show"
+        for step in play_steps:
+            assert step.get("prompt")
+        for step in show_steps:
+            assert "prompt" not in step
+
+    def test_related_drill_id_null_for_seed_lessons(self, client):
+        for lesson_id in ("italiana-idee", "forchetta-cavallo"):
+            r = client.get(f"/training/lessons/{lesson_id}")
+            assert r.json()["related_drill_id"] is None

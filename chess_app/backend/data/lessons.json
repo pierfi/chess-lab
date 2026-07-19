@@ -1,0 +1,80 @@
+[
+  {
+    "id": "italiana-idee",
+    "title": "L'Apertura Italiana: sviluppo e pressione su f7",
+    "category": "opening",
+    "level": "beginner",
+    "orientation": "white",
+    "summary": "Le idee di base del Giuoco Piano: occupare il centro, sviluppare i pezzi e puntare a f7.",
+    "intro": "L'Italiana è una delle aperture più antiche e naturali. L'idea è semplice: prendi il centro con il pedone, sviluppa i pezzi leggeri verso il centro e punta l'alfiere sul punto più debole della posizione nera, il pedone f7 difeso solo dal re.",
+    "start_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "related_drill_id": null,
+    "line": [
+      {
+        "san": "e4",
+        "mode": "show",
+        "comment": "Il Bianco occupa il centro e apre le diagonali per l'alfiere di re e per la donna."
+      },
+      {
+        "san": "e5",
+        "mode": "show",
+        "comment": "Il Nero risponde simmetricamente, contendendo il centro con lo stesso pedone."
+      },
+      {
+        "san": "Nf3",
+        "mode": "show",
+        "comment": "Sviluppo con minaccia: il cavallo esce e attacca subito il pedone e5. Sviluppare creando una minaccia è sempre efficiente."
+      },
+      {
+        "san": "Nc6",
+        "mode": "show",
+        "comment": "Il Nero difende e5 sviluppando a sua volta un cavallo verso il centro. Difesa e sviluppo in una mossa sola."
+      },
+      {
+        "san": "Bc4",
+        "mode": "play",
+        "prompt": "Sviluppa l'alfiere di re nella casa più aggressiva: cerca la diagonale che punta dritta al pedone f7.",
+        "comment": "Bc4! L'alfiere prende la diagonale a2-g8 e mira a f7, difeso solo dal re nero. Questa pressione su f7 è il cuore dell'Italiana."
+      },
+      {
+        "san": "Bc5",
+        "mode": "show",
+        "comment": "Il Nero imita: anche il suo alfiere esce a puntare f2. Questa simmetria è il Giuoco Piano, la 'partita tranquilla'."
+      },
+      {
+        "san": "c3",
+        "mode": "show",
+        "comment": "Una mossa di preparazione: il pedone in c3 apre la strada a d4, con cui il Bianco vuole costruire un grande centro di pedoni al prossimo colpo."
+      }
+    ]
+  },
+  {
+    "id": "forchetta-cavallo",
+    "title": "La forchetta di cavallo: attaccare due pezzi insieme",
+    "category": "tactic",
+    "level": "beginner",
+    "orientation": "white",
+    "summary": "Il motivo tattico più redditizio per chi inizia: il cavallo attacca re e donna nello stesso momento.",
+    "intro": "Il cavallo è il maestro delle forchette. Dalla casa giusta attacca due pezzi contemporaneamente, e se uno dei due è il re (scacco!) l'avversario è costretto a pararlo e non può salvare l'altro. Qui il Bianco muove e vince la donna.",
+    "start_fen": "4q1k1/8/8/3N4/8/8/8/K7 w - - 0 1",
+    "related_drill_id": null,
+    "line": [
+      {
+        "san": "Nf6+",
+        "mode": "play",
+        "prompt": "Trova la forchetta: c'è una casa da cui il cavallo dà scacco al re e attacca la donna nello stesso momento.",
+        "comment": "Nf6+! Il cavallo dà scacco al re in g8 e allo stesso tempo attacca la donna in e8. Il Nero deve parare lo scacco muovendo il re, e non fa in tempo a salvare la donna."
+      },
+      {
+        "san": "Kg7",
+        "mode": "show",
+        "comment": "Il re è obbligato a spostarsi per uscire dallo scacco — ma così abbandona la donna al suo destino."
+      },
+      {
+        "san": "Nxe8+",
+        "mode": "show",
+        "comment": "Il cavallo cattura la donna, per giunta con un altro scacco. Con una sola mossa doppia hai vinto il pezzo più forte: questa è la forza della forchetta di cavallo."
+      }
+    ]
+  }
+]
