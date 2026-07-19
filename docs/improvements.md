@@ -95,3 +95,16 @@ piena forza e che a Skill 0 gli eval divergono. Aggiorna la nota di Fase 2
 - Nessun impatto su logica di gioco, hint, replay: è puro CSS/layout, la board resta lo stesso `buildBoardEl()` introdotto in Fase 3, solo il suo container cambia dimensione.
 
 **Nota:** puramente frontend, nessun endpoint coinvolto. Da lanciare come branch dedicato (`feature/board-resize` o simile) dopo che `feature/training-ui` è mergiata, per non toccare `frontend/index.html` in parallelo con quel lavoro.
+
+---
+
+## Pipeline di sourcing per le lezioni di teoria (idea in backlog, non progettata)
+
+**Stato:** idea catturata, nessun design né implementazione — esplicitamente un progetto parallelo, non bloccante per le lezioni di teoria v1 (`docs/theory-lessons-design.md`)
+**Richiesto da:** utente, 18 luglio 2026
+
+**Pitch:** le lezioni di teoria v1 sono un set statico curato a mano (~5-6 lezioni, autorate da agenti Opus/Sonnet). L'utente vorrebbe che il set potesse **crescere nel tempo** attingendo a **fonti open-source** reali (stesso spirito di come sono stati sourced gli SVG dei pezzi Cburnett, con licenza/provenienza tracciate in `pieces/NOTICE.md`), con ogni lezione che porta una **lista di fonti** citate. Ha ipotizzato una **skill dedicata** che individui periodicamente fonti online da monitorare per generare nuove lezioni, e modelli (Opus o altri) che riorganizzino/curino il materiale trovato in formato lezione.
+
+**Perché non ora:** tocca terreno non ancora esplorato in questo progetto — selezione di fonti attendibili, verifica di licenza/attribuzione per contenuto testuale/PGN annotato (diverso dal caso SVG, qui il contenuto è "sostanza" scacchistica, non solo asset grafico), eventuale accesso di rete ricorrente (in contrasto con il pattern attuale "l'app non tocca mai la rete a runtime", vedi il bundle puzzle Lichess in Fase 6 — qui però il consumo sarebbe in fase di *authoring*, non a runtime, quindi il vincolo runtime resterebbe rispettato). Prima di qualunque codice serve un documento di design dedicato (stesso schema di `docs/theory-lessons-design.md` o `docs/threatened-pieces-design.md`) quando la feature avrà priorità.
+
+**Nota:** collegata a `docs/theory-lessons-design.md` §8 domanda 1 ("chi autora le lezioni oltre le due d'esempio").
