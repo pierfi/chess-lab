@@ -867,7 +867,7 @@ body {
 
 /* ---------- Replay ---------- */
 .replay-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 13px; }
-.replay-head #replay-title { color: var(--text-dim); }
+.replay-head #replay-title, .replay-head #lesson-title { color: var(--text-dim); }
 
 .replay-controls { display: flex; gap: 6px; margin-bottom: 10px; }
 
@@ -998,6 +998,36 @@ body {
   padding: 5px 8px;
   cursor: pointer;
 }
+
+/* ---------- Lezioni di teoria (sotto-sezione Allenamento) ---------- */
+/* Pill categoria: stessa forma di .eg-goal, un colore per categoria */
+.lesson-cat {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: bold;
+  color: #fff;
+  border-radius: 8px;
+  padding: 2px 8px;
+}
+
+.lesson-cat.opening { background: var(--blue); }
+.lesson-cat.tactic { background: var(--orange); }
+.lesson-cat.endgame { background: var(--green); }
+
+/* Pannello commento accanto alla board: intro, prompt o commento dello step */
+.lesson-comment {
+  font-size: 13px;
+  line-height: 1.55;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--surface);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+}
+
+.lesson-comment .lc-intro { color: var(--text-dim); font-style: italic; }
+.lesson-comment .lc-intro + div { margin-top: 8px; }
+.lesson-comment .lc-done { color: var(--accent-dark); font-weight: bold; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -1168,45 +1198,91 @@ body {
 </div>
 
 <!-- Vista Allenamento (Fase 4 frontend): puzzle dai propri errori + profilo
-     debolezze + drill di finali teorici. Tutta l'API è già pronta lato backend. -->
+     debolezze + drill di finali teorici + lezioni di teoria. Tutta l'API è già
+     pronta lato backend. -->
 <div class="view" id="view-training" style="display:none">
-  <div class="app">
-    <div class="board-area">
-      <div class="board-container">
-        <div id="puzzle-board"></div>
-        <div class="status-bar" id="puzzle-status"></div>
+  <div id="training-main">
+    <div class="app">
+      <div class="board-area">
+        <div class="board-container">
+          <div id="puzzle-board"></div>
+          <div class="status-bar" id="puzzle-status"></div>
+        </div>
       </div>
-    </div>
-    <div class="sidebar">
-      <div class="card">
-        <h3>Puzzle dai tuoi errori</h3>
-        <div class="puzzle-meta" id="puzzle-meta"></div>
-        <div class="puzzle-feedback" id="puzzle-feedback"></div>
-        <div class="puzzle-sub" id="puzzle-sub"></div>
-        <div class="puzzle-actions">
-          <button class="btn btn-primary" id="puzzle-next-btn" onclick="loadPuzzle(true)">Prossimo puzzle</button>
+      <div class="sidebar">
+        <div class="card">
+          <h3>Puzzle dai tuoi errori</h3>
+          <div class="puzzle-meta" id="puzzle-meta"></div>
+          <div class="puzzle-feedback" id="puzzle-feedback"></div>
+          <div class="puzzle-sub" id="puzzle-sub"></div>
+          <div class="puzzle-actions">
+            <button class="btn btn-primary" id="puzzle-next-btn" onclick="loadPuzzle(true)">Prossimo puzzle</button>
+          </div>
         </div>
       </div>
     </div>
+
+    <div class="train-grid">
+      <div class="card">
+        <h3>Debolezze probabili</h3>
+        <div id="weakness-content"></div>
+        <div class="weak-note" id="weakness-note"></div>
+      </div>
+      <div class="card">
+        <h3>Drill di finali teorici</h3>
+        <div class="eg-elo-row">
+          <span>Forza avversario</span>
+          <select id="eg-elo" title="ELO dell'engine nel drill">
+            <option value="1300">ELO 1300</option>
+            <option value="1700">ELO 1700</option>
+            <option value="2400" selected>ELO 2400 (consigliato)</option>
+          </select>
+        </div>
+        <div class="eg-list" id="endgame-list"></div>
+      </div>
+    </div>
+
+    <!-- Lezioni di teoria: lo strato didattico "a monte" di puzzle e drill
+         (docs/theory-lessons-design.md). Contenuto statico dal backend. -->
+    <div class="card" style="margin-top:16px">
+      <h3>Lezioni di teoria</h3>
+      <div class="ext-note">Impara un concetto guidato mossa per mossa &mdash; poi mettilo alla prova nei drill e nei puzzle qui sopra.</div>
+      <div class="eg-list" id="lesson-list"></div>
+    </div>
   </div>
 
-  <div class="train-grid">
-    <div class="card">
-      <h3>Debolezze probabili</h3>
-      <div id="weakness-content"></div>
-      <div class="weak-note" id="weakness-note"></div>
-    </div>
-    <div class="card">
-      <h3>Drill di finali teorici</h3>
-      <div class="eg-elo-row">
-        <span>Forza avversario</span>
-        <select id="eg-elo" title="ELO dell'engine nel drill">
-          <option value="1300">ELO 1300</option>
-          <option value="1700">ELO 1700</option>
-          <option value="2400" selected>ELO 2400 (consigliato)</option>
-        </select>
+  <!-- Visualizzatore lezione: stepping stile replay per le mosse "show" +
+       interazione stile puzzle per le mosse "play" (design doc §2). -->
+  <div id="lesson-section" style="display:none">
+    <div class="app">
+      <div class="board-area">
+        <div class="board-container">
+          <div id="lesson-board"></div>
+          <div class="status-bar" id="lesson-status"></div>
+        </div>
       </div>
-      <div class="eg-list" id="endgame-list"></div>
+      <div class="sidebar">
+        <div class="card">
+          <div class="replay-head">
+            <button class="btn" onclick="closeLesson()">&larr; Lezioni</button>
+            <span id="lesson-title"></span>
+          </div>
+          <div class="puzzle-meta" id="lesson-meta"></div>
+          <div class="lesson-comment" id="lesson-comment"></div>
+          <div class="puzzle-feedback" id="lesson-feedback"></div>
+          <div class="replay-controls">
+            <button id="ls-start" onclick="lessonGotoStart()" title="Posizione di partenza">&#171;</button>
+            <button id="ls-prev" onclick="lessonPrev()" title="Passo indietro">&#8249;</button>
+            <button id="ls-next" onclick="lessonNext()" title="Passo avanti">&#8250;</button>
+            <button id="ls-end" onclick="lessonGotoEnd()" title="Avanza fino alla prossima mossa da trovare (o alla fine)">&#187;</button>
+            <button id="ls-play" onclick="toggleLessonPlay()" title="Riproduzione automatica &mdash; si ferma da sola sulle mosse da trovare">&#9654;</button>
+          </div>
+          <div class="move-list" id="lesson-moves"></div>
+          <div class="puzzle-actions" id="lesson-drill-actions" style="display:none; margin-top:10px">
+            <button class="btn btn-primary" id="lesson-drill-btn" onclick="lessonDrillStart()">Prova ora contro l'engine</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -2620,6 +2696,9 @@ let currentView = 'play';
 
 function showView(name) {
   currentView = name;
+  // L'autoplay di una lezione non deve continuare a scorrere in background
+  // mentre l'utente è su un'altra vista.
+  if (name !== 'training') stopLessonPlay();
   document.getElementById('view-play').style.display = name === 'play' ? 'flex' : 'none';
   document.getElementById('view-training').style.display = name === 'training' ? 'block' : 'none';
   document.getElementById('view-puzzles').style.display = name === 'puzzles' ? 'block' : 'none';
@@ -3070,6 +3149,9 @@ function loadTraining() {
   else renderPuzzle();
   loadWeaknesses();
   loadEndgames();
+  // Come per il puzzle in corso: una lezione aperta NON viene abbandonata
+  // rientrando nella vista — si ricarica solo la lista (dietro al viewer).
+  loadLessons();
 }
 
 // ---------- Puzzle dai propri errori ----------
@@ -3388,6 +3470,350 @@ async function startEndgameDrill(drill) {
     setStatus('Errore avvio drill: ' + e.message);
   }
 }
+
+// ---------- Lezioni di teoria (sotto-sezione Allenamento) ----------
+//
+// Una lezione è la ricombinazione di due meccaniche esistenti (design doc
+// docs/theory-lessons-design.md §2): le mosse "show" si scorrono come nel
+// replay dello Storico (fens[idx] precomputati dal backend, stesso contratto
+// di GET /game/{id}/replay), le mosse "play" si giocano con l'interazione
+// click-click del puzzle solver. La validazione delle mosse "play" è un puro
+// confronto UCI lato client: la mossa attesa è già nel dettaglio fetchato
+// (niente round-trip, diversamente dal puzzle solver che non conosce la
+// soluzione). Indexing: fens[idx] è la posizione PRIMA di line[idx] — la
+// mossa "in arrivo" dalla posizione corrente è line[lesson.idx].
+
+const LESSON_CAT_LABEL = { opening: 'Apertura', tactic: 'Tattica', endgame: 'Finale' };
+const LESSON_LEVEL_LABEL = { beginner: 'Base', intermediate: 'Intermedio' };
+const LESSON_PLAY_MS = 1800;   // passo dell'autoplay (design doc §2.1: ~1.5–2s)
+
+// Stato dedicato, separato da `state` (partita live), `training` (puzzle dai
+// propri errori) ed `ext` (puzzle Lichess): tutto in memoria, niente storage.
+let lesson = {
+  list: [],            // GET /training/lessons
+  detail: null,        // GET /training/lessons/{id} (viewer aperto se != null)
+  idx: 0,              // posizione corrente: la board mostra detail.fens[idx]
+  maxReached: 0,       // indice massimo raggiunto (sblocca la rinavigazione)
+  selectedSq: null,
+  legalMoves: [],
+  wrongMsg: null,      // feedback gentile su mossa "play" sbagliata
+  playTimer: null,     // setInterval dell'autoplay (null = fermo)
+};
+
+async function loadLessons() {
+  const el = document.getElementById('lesson-list');
+  if (lesson.list.length === 0) el.innerHTML = '<div class="hist-msg">Caricamento&hellip;</div>';
+  try {
+    const data = await fetchJson('/training/lessons');
+    lesson.list = data.lessons || [];
+    renderLessonList();
+  } catch (e) {
+    el.innerHTML = '<div class="hist-msg">Errore: backend non raggiungibile (' + e.message + ')</div>';
+  }
+}
+
+function renderLessonList() {
+  const el = document.getElementById('lesson-list');
+  el.innerHTML = '';
+  if (lesson.list.length === 0) {
+    el.innerHTML = '<div class="hist-msg">Nessuna lezione disponibile</div>';
+    return;
+  }
+  lesson.list.forEach(ls => {
+    const row = document.createElement('div');
+    row.className = 'eg-row';
+    row.innerHTML =
+      '<div class="eg-text"><div class="eg-name">' + ls.title + '</div>' +
+      '<div class="eg-desc">' + ls.summary + '</div></div>' +
+      '<span class="lesson-cat ' + ls.category + '" title="Categoria">' + (LESSON_CAT_LABEL[ls.category] || ls.category) + '</span>' +
+      '<span class="puzzle-review-tag" title="Livello">' + (LESSON_LEVEL_LABEL[ls.level] || ls.level) + '</span>';
+    const btn = document.createElement('button');
+    btn.className = 'btn';
+    btn.textContent = 'Apri';
+    btn.title = 'Apri la lezione';
+    btn.onclick = () => openLesson(ls.id);
+    row.appendChild(btn);
+    el.appendChild(row);
+  });
+}
+
+async function openLesson(lessonId) {
+  stopLessonPlay();
+  let data;
+  try {
+    data = await fetchJson('/training/lessons/' + lessonId);
+  } catch (e) {
+    document.getElementById('lesson-list').insertAdjacentHTML(
+      'afterbegin', '<div class="hist-msg">Errore apertura lezione: ' + e.message + '</div>');
+    return;
+  }
+  lesson.detail = data;
+  lesson.idx = 0;
+  lesson.maxReached = 0;
+  lesson.selectedSq = null;
+  lesson.legalMoves = [];
+  lesson.wrongMsg = null;
+  document.getElementById('lesson-title').textContent = data.title;
+  document.getElementById('lesson-meta').innerHTML =
+    '<span class="lesson-cat ' + data.category + '">' + (LESSON_CAT_LABEL[data.category] || data.category) + '</span>' +
+    '<span class="puzzle-review-tag">' + (LESSON_LEVEL_LABEL[data.level] || data.level) + '</span>' +
+    '<span>' + data.line.length + ' mosse</span>';
+  // Link lezione -> drill (v1, §8 Q4): visibile per tutta la lezione se la
+  // lezione ha un drill collegato, così è sempre raggiungibile anche a fine.
+  document.getElementById('lesson-drill-actions').style.display = data.related_drill_id ? 'flex' : 'none';
+  document.getElementById('training-main').style.display = 'none';
+  document.getElementById('lesson-section').style.display = 'block';
+  renderLesson();
+}
+
+function closeLesson() {
+  stopLessonPlay();
+  lesson.detail = null;
+  document.getElementById('lesson-section').style.display = 'none';
+  document.getElementById('training-main').style.display = '';
+}
+
+// "N. san" / "N… san" — stessa formattazione del replay
+function lessonMoveLabel(step) {
+  return Math.ceil(step.ply / 2) + (step.ply % 2 === 1 ? '.' : '…') + ' ' + step.san;
+}
+
+// True se dalla posizione corrente si può avanzare senza risolvere: la mossa
+// in arrivo è "show", oppure lo step è già stato superato (rinavigazione).
+function lessonCanAdvance() {
+  const d = lesson.detail;
+  if (!d || lesson.idx >= d.fens.length - 1) return false;
+  return d.line[lesson.idx].mode === 'show' || lesson.idx + 1 <= lesson.maxReached;
+}
+
+// Un passo avanti se consentito; ritorna false quando si blocca (step "play"
+// da risolvere o fine linea) — è la condizione di stop dell'autoplay.
+function lessonAdvance() {
+  if (!lessonCanAdvance()) return false;
+  lessonSetIdx(lesson.idx + 1);
+  return true;
+}
+
+function lessonSetIdx(idx) {
+  lesson.idx = idx;
+  lesson.maxReached = Math.max(lesson.maxReached, idx);
+  lesson.selectedSq = null;
+  lesson.legalMoves = [];
+  lesson.wrongMsg = null;
+  renderLesson();
+}
+
+function lessonPrev() {
+  stopLessonPlay();
+  if (lesson.detail && lesson.idx > 0) lessonSetIdx(lesson.idx - 1);
+}
+
+function lessonNext() {
+  stopLessonPlay();
+  lessonAdvance();
+}
+
+function lessonGotoStart() {
+  stopLessonPlay();
+  if (lesson.detail) lessonSetIdx(0);
+}
+
+function lessonGotoEnd() {
+  stopLessonPlay();
+  while (lessonAdvance()) { /* si ferma da solo su uno step "play" o a fine linea */ }
+}
+
+// Click-to-jump dalla move list: solo verso posizioni già raggiunte — saltare
+// oltre scavalcherebbe uno step "play" non ancora risolto.
+function lessonGoto(idx) {
+  stopLessonPlay();
+  if (!lesson.detail || idx < 0 || idx > lesson.maxReached) return;
+  lessonSetIdx(idx);
+}
+
+function toggleLessonPlay() {
+  if (lesson.playTimer) {
+    stopLessonPlay();
+    renderLesson();
+    return;
+  }
+  if (!lessonCanAdvance()) return;
+  lesson.playTimer = setInterval(() => {
+    // Si ferma da solo quando incontra una mossa da trovare o la fine (§2.1):
+    // mai auto-avanzare attraverso uno step che l'utente deve risolvere.
+    if (!lessonAdvance()) { stopLessonPlay(); renderLesson(); }
+  }, LESSON_PLAY_MS);
+  renderLesson();
+}
+
+function stopLessonPlay() {
+  if (lesson.playTimer) { clearInterval(lesson.playTimer); lesson.playTimer = null; }
+}
+
+function renderLesson() {
+  const d = lesson.detail;
+  if (!d) return;
+  const idx = lesson.idx;
+  const total = d.line.length;
+  const atEnd = idx === d.fens.length - 1;
+  const step = atEnd ? null : d.line[idx];          // mossa in arrivo da questa posizione
+  const isPlayStep = !!step && step.mode === 'play';
+
+  // Board: renderer condiviso; interattiva SOLO su uno step "play" in corso.
+  const wrapper = document.getElementById('lesson-board');
+  wrapper.innerHTML = '';
+  const lastUci = idx > 0 ? d.line[idx - 1].uci : null;
+  wrapper.appendChild(buildBoardEl({
+    fen: d.fens[idx],
+    orientation: d.orientation,
+    lastMove: lastUci ? { from: lastUci.slice(0, 2), to: lastUci.slice(2, 4) } : null,
+    selectedSq: lesson.selectedSq,
+    legalMoves: lesson.legalMoves,
+    onSquare: isPlayStep ? onLessonSquare : null,
+  }));
+
+  const st = document.getElementById('lesson-status');
+  if (isPlayStep) {
+    st.textContent = 'Tocca a te: trova la mossa della lezione (' + (idx + 1) + '/' + total + ')';
+    st.className = 'status-bar status-turn';
+  } else {
+    st.className = 'status-bar';
+    st.textContent = idx === 0
+      ? 'Posizione di partenza'
+      : 'Dopo ' + lessonMoveLabel(d.line[idx - 1]) + ' (' + idx + '/' + total + ')';
+  }
+
+  // Pannello commento: intro all'apertura, prompt sugli step "play" in attesa,
+  // commento della mossa appena vista/risolta altrimenti (+ chiusura a fine).
+  let html = '';
+  if (idx === 0 && d.intro) html += '<div class="lc-intro">' + d.intro + '</div>';
+  if (isPlayStep) {
+    html += '<div>' + (step.prompt || 'Trova la mossa della lezione.') + '</div>';
+  } else if (idx > 0) {
+    const prev = d.line[idx - 1];
+    html += '<div><b>' + lessonMoveLabel(prev) + '</b>' + (prev.comment ? ' — ' + prev.comment : '') + '</div>';
+  }
+  if (atEnd) html += '<div class="lc-done">Lezione completata!</div>';
+  document.getElementById('lesson-comment').innerHTML = html;
+
+  const fb = document.getElementById('lesson-feedback');
+  fb.className = 'puzzle-feedback' + (lesson.wrongMsg ? ' ko' : '');
+  fb.textContent = lesson.wrongMsg || '';
+
+  document.getElementById('ls-start').disabled = idx === 0;
+  document.getElementById('ls-prev').disabled = idx === 0;
+  const canFwd = lessonCanAdvance();
+  document.getElementById('ls-next').disabled = !canFwd;
+  document.getElementById('ls-end').disabled = !canFwd;
+  const playBtn = document.getElementById('ls-play');
+  playBtn.disabled = !lesson.playTimer && !canFwd;
+  playBtn.innerHTML = lesson.playTimer ? '&#10074;&#10074;' : '&#9654;';
+
+  // Move list SAN come nel replay: cursore sullo step corrente, click-to-jump
+  // solo sugli step già raggiunti (le mosse future restano visibili, §8 Q2).
+  const ml = document.getElementById('lesson-moves');
+  let mhtml = '';
+  for (let i = 0; i < total; i += 2) {
+    mhtml += '<div class="move-row"><span class="move-num">' + (i / 2 + 1) + '.</span>' +
+      lessonMoveSpan(i) + (d.line[i + 1] ? lessonMoveSpan(i + 1) : '') + '</div>';
+  }
+  ml.innerHTML = mhtml;
+  const cur = ml.querySelector('.rp-cursor');
+  if (cur) cur.scrollIntoView({ block: 'nearest' });
+}
+
+function lessonMoveSpan(i) {
+  const reachable = i + 1 <= lesson.maxReached;
+  const cls = 'move' + (reachable ? ' rp-click' : '') + (lesson.idx === i + 1 ? ' rp-cursor' : '');
+  return '<span class="' + cls + '"' + (reachable ? ' onclick="lessonGoto(' + (i + 1) + ')"' : '') + '>' +
+    lesson.detail.line[i].san + '</span>';
+}
+
+// Stessa interazione click-click del puzzle solver (onPuzzleSquare), sullo
+// stato della lezione: i candidati client-side restano un aiuto visivo, la
+// "validazione" è il confronto con la mossa della lezione in lessonTryMove.
+async function onLessonSquare(sq) {
+  const d = lesson.detail;
+  if (!d) return;
+  const step = d.line[lesson.idx];
+  if (!step || step.mode !== 'play') return;
+  const fen = d.fens[lesson.idx];
+  const color = fen.split(' ')[1] === 'w' ? 'white' : 'black';
+  const pieceMap = fenToMap(fen);
+
+  if (lesson.selectedSq) {
+    if (lesson.selectedSq === sq) {
+      lesson.selectedSq = null;
+      lesson.legalMoves = [];
+      renderLesson();
+      return;
+    }
+    const move = lesson.legalMoves.find(m => m.to === sq);
+    if (move) {
+      let uci = move.from + move.to;
+      if (move.promo) uci += await askPromotion(color);
+      lessonTryMove(uci);
+      return;
+    }
+  }
+
+  const piece = pieceMap[sq];
+  if (piece) {
+    const isOwn = color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase();
+    if (isOwn) {
+      lesson.selectedSq = sq;
+      lesson.legalMoves = generateMoveCandidates(fen, sq, color);
+      renderLesson();
+      return;
+    }
+  }
+
+  lesson.selectedSq = null;
+  lesson.legalMoves = [];
+  renderLesson();
+}
+
+// Confronto UCI lato client, case-insensitive: la mossa attesa è già nel
+// dettaglio fetchato (design doc §2.2) — nessuna chiamata al backend, nessuno
+// scoring. Mossa giusta: avanza e mostra il commento; sbagliata: feedback
+// gentile e si riprova.
+function lessonTryMove(uci) {
+  const d = lesson.detail;
+  const step = d && d.line[lesson.idx];
+  if (!step || step.mode !== 'play') return;
+  if (uci.toLowerCase() === step.uci.toLowerCase()) {
+    playSound('check');            // stesso suono "corretto" del puzzle solver
+    lessonSetIdx(lesson.idx + 1);
+  } else {
+    lesson.selectedSq = null;
+    lesson.legalMoves = [];
+    lesson.wrongMsg = 'Non è la mossa della lezione — riprova.';
+    renderLesson();
+  }
+}
+
+// Bottone "Prova ora contro l'engine": avvia il drill collegato riusando
+// l'identico flusso del pannello drill (requestGameStart + startEndgameDrill),
+// nessun percorso parallelo.
+async function lessonDrillStart() {
+  const d = lesson.detail;
+  if (!d || !d.related_drill_id) return;
+  stopLessonPlay();
+  if (endgames.length === 0) await loadEndgames();
+  const drill = endgames.find(x => x.id === d.related_drill_id);
+  if (!drill) return;
+  requestGameStart(() => startEndgameDrill(drill));
+}
+
+// Frecce tastiera nella lezione (stesso pattern del replay: attive solo con
+// il viewer aperto nella vista Allenamento)
+document.addEventListener('keydown', e => {
+  if (currentView !== 'training' || !lesson.detail) return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); lessonPrev(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); lessonNext(); }
+  else if (e.key === 'Home') { e.preventDefault(); lessonGotoStart(); }
+  else if (e.key === 'End') { e.preventDefault(); lessonGotoEnd(); }
+});
 
 // ---------- Puzzle tattici (Fase 6 — dataset Lichess esterno) ----------
 

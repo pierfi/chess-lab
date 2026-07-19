@@ -331,6 +331,84 @@ check('drill: player = lato al tratto (nero)', ev('state.playerColor') === 'blac
 check('drill: vista Gioca attiva', $('view-play').style.display === 'flex');
 check('drill: status mostra obiettivo', $('status').textContent.includes('Philidor'), $('status').textContent);
 
+// ---- Lezioni di teoria (sotto-sezione Allenamento) ----
+// Il dettaglio di confronto viene letto direttamente dall'API (stessa fonte
+// del frontend): i check confrontano ciò che la UI mostra con i dati veri.
+ev("showView('training')");
+await waitFor(() => ev('lesson.list.length') > 0, 15000);
+check('lezioni: lista caricata (6 lezioni)', ev('lesson.list.length') === 6, ev('lesson.list.length') + ' lezioni');
+check('lezioni: righe renderizzate', $('lesson-list').querySelectorAll('.eg-row').length === 6);
+check('lezioni: id attesi presenti',
+  ev("lesson.list.some(l => l.id === 'italiana-idee') && lesson.list.some(l => l.id === 'lucena-ponte')"));
+
+const lessonDetail = await (await fetch(`${API}/training/lessons/italiana-idee`)).json();
+await ev("openLesson('italiana-idee')");
+check('lezioni: viewer aperto (lista nascosta)',
+  $('lesson-section').style.display === 'block' && $('training-main').style.display === 'none');
+check('lezioni: board renderizzata (64 caselle)', window.document.querySelectorAll('#lesson-board .square').length === 64);
+check('lezioni: intro mostrata all\'apertura',
+  $('lesson-comment').textContent.includes(lessonDetail.intro.slice(0, 40)));
+
+// Stepping "show": board e commento seguono lo step corrente
+ev('lessonNext()');
+check('lezioni: next avanza (idx 1)', ev('lesson.idx') === 1);
+const e4img = window.document.querySelector('#lesson-board .square[data-sq="e4"] img');
+check('lezioni: board aggiornata (pedone bianco in e4)', !!e4img && e4img.alt === 'P');
+check('lezioni: commento dello step mostrato',
+  $('lesson-comment').textContent.includes(lessonDetail.line[0].comment.slice(0, 30)));
+
+// Avanti fino allo stop: si ferma sullo step "play" (Bc4, idx 4), mai oltre
+ev('lessonGotoEnd()');
+check('lezioni: end si ferma sullo step da giocare (idx 4)', ev('lesson.idx') === 4, 'idx=' + ev('lesson.idx'));
+check('lezioni: prompt mostrato in attesa della mossa',
+  $('lesson-comment').textContent.includes(lessonDetail.line[4].prompt.slice(0, 30)));
+check('lezioni: next disabilitato sullo step play', $('ls-next').disabled === true);
+
+// Mossa sbagliata: nessun avanzamento, feedback gentile, si riprova
+ev("lessonTryMove('d2d4')");
+check('lezioni: mossa sbagliata non avanza', ev('lesson.idx') === 4);
+check('lezioni: feedback "riprova"', $('lesson-feedback').textContent.includes('riprova'), $('lesson-feedback').textContent);
+
+// Mossa giusta via click DOM reali sulle caselle (f1 -> c4 = Bc4)
+window.document.querySelector('#lesson-board .square[data-sq="f1"]').click();
+await waitFor(() => ev("lesson.selectedSq === 'f1'"), 3000);
+check('lezioni: pezzo selezionato con candidati', ev("lesson.selectedSq === 'f1'") && ev('lesson.legalMoves.length') > 0);
+window.document.querySelector('#lesson-board .square[data-sq="c4"]').click();
+await waitFor(() => ev('lesson.idx') === 5, 3000);
+check('lezioni: mossa giusta avanza (idx 5)', ev('lesson.idx') === 5);
+check('lezioni: commento della mossa risolta',
+  $('lesson-comment').textContent.includes(lessonDetail.line[4].comment.slice(0, 30)));
+
+// Completamento (gli step restanti sono "show")
+ev('lessonGotoEnd()');
+check('lezioni: raggiunta l\'ultima posizione', ev('lesson.idx') === ev('lesson.detail.fens.length - 1'));
+check('lezioni: stato di completamento mostrato', $('lesson-comment').textContent.includes('completata'));
+check('lezioni: nessun bottone drill senza related_drill_id', $('lesson-drill-actions').style.display === 'none');
+
+// Autoplay: parte, avanza da solo e si ferma da solo sullo step "play"
+await ev("openLesson('italiana-idee')");   // reset: maxReached torna a 0
+ev('toggleLessonPlay()');
+check('lezioni: autoplay attivo', ev('!!lesson.playTimer'));
+const autoStopped = await waitFor(() => ev('lesson.idx') === 4 && ev('!lesson.playTimer'), 15000);
+check('lezioni: autoplay si ferma sullo step play (idx 4)', autoStopped, 'idx=' + ev('lesson.idx'));
+
+// Link lezione -> drill (lucena-ponte -> drill "lucena"): il click passa dal
+// flusso esistente requestGameStart + startEndgameDrill e ruota nella vista
+// Gioca — stessa verifica del blocco drill qui sopra, innescata dal bottone.
+await ev("openLesson('lucena-ponte')");
+check('lezioni: bottone drill visibile (related_drill_id)', $('lesson-drill-actions').style.display !== 'none');
+const preDrillGid = ev('state.gameId');
+$('lesson-drill-btn').click();
+// La partita philidor precedente è a 0 mosse, quindi il modal di conferma non
+// dovrebbe comparire — gestito comunque per robustezza dell'harness.
+await sleep(150);
+if ($('confirm-overlay').classList.contains('visible')) ev('confirmNewGame()');
+await waitFor(() => ev('state.gameId') && ev('state.gameId') !== preDrillGid, 15000);
+check('lezioni: click drill crea una nuova partita', ev('state.gameId') !== preDrillGid, ev('state.gameId'));
+check('lezioni: drill lucena — FEN di partenza corretta', ev('state.fen').startsWith('1K1k4/1P6'), ev('state.fen'));
+check('lezioni: vista Gioca attiva dopo il drill', $('view-play').style.display === 'flex');
+check('lezioni: status mostra il drill Lucena', $('status').textContent.includes('Lucena'), $('status').textContent);
+
 // ---- WebSocket dedup: un game-over deve bypassare il dedup ply-based ----
 // Regressione (intersezione time-control × websocket): con la bandierina la
 // mossa che fa scattare il flag non viene mai applicata, quindi il ply non
