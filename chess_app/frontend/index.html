@@ -23,6 +23,10 @@
   --orange: #e68a2e;
   --yellow: #d6a000;
   --blue: #3a7ecf;
+  /* Lato (outer, bordi inclusi) di TUTTE le board: 484px = 8 celle da 60px +
+     4px di bordi, identico al layout storico. Aggiornata via JS dal drag della
+     maniglia .board-resize (vedi applyBoardSize). */
+  --board-size: 484px;
 }
 
 body {
@@ -87,7 +91,7 @@ body {
   display: none;
   position: relative;
   width: 16px;
-  height: 484px;
+  height: var(--board-size); /* segue la board ridimensionabile */
   background: #3c3934;
   border-radius: 3px;
   overflow: hidden;
@@ -148,8 +152,12 @@ body {
 
 .board {
   display: grid;
-  grid-template-columns: repeat(8, 60px);
-  grid-template-rows: repeat(8, 60px);
+  /* Celle in fr, non px fissi: scalano proporzionalmente con --board-size.
+     Con box-sizing border-box: 484px - 4px di bordi = 480px -> 60px/cella al default. */
+  width: var(--board-size);
+  height: var(--board-size);
+  grid-template-columns: repeat(8, 1fr);
+  grid-template-rows: repeat(8, 1fr);
   border: 2px solid #c9c5c0;
   border-radius: 4px;
   overflow: hidden;
@@ -184,6 +192,27 @@ body {
   pointer-events: none;
   z-index: 5;
 }
+
+/* Maniglia di ridimensionamento stile chessground (<cg-resize> su Lichess):
+   angolo in basso a destra di ogni board, trascinala per scalare la scacchiera
+   (sempre quadrata, vedi startBoardResize). Grip a righe diagonali. */
+.board-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 17px;
+  height: 17px;
+  cursor: nwse-resize;
+  z-index: 6; /* above the arrow layer (5): the grip stays clickable */
+  background: linear-gradient(315deg,
+    rgba(0, 0, 0, 0.4) 2px, transparent 2px, transparent 5px,
+    rgba(0, 0, 0, 0.4) 5px, rgba(0, 0, 0, 0.4) 7px, transparent 7px, transparent 10px,
+    rgba(0, 0, 0, 0.4) 10px, rgba(0, 0, 0, 0.4) 12px, transparent 12px);
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+
+.board-resize:hover { opacity: 1; }
 
 .square {
   display: flex;
@@ -1623,6 +1652,38 @@ function askPromotion(color) {
   });
 }
 
+// ---------- Scacchiera ridimensionabile (drag-to-resize, stile chessground) ----------
+// Dimensione UNICA condivisa da tutte le board (live, replay, puzzle, lezioni):
+// una variabile CSS --board-size sul <html>, celle della griglia in fr che
+// scalano da sole. Solo in memoria — niente localStorage, si resetta a ogni
+// ricarica come lo stato di gioco (stessa convenzione CLAUDE.md).
+const BOARD_SIZE_MIN = 320;   // sotto, coordinate e pezzi diventano illeggibili
+const BOARD_SIZE_MAX = 800;   // sopra, sborda dal layout a due colonne
+let boardSize = 484;          // default: identico al layout storico (60px/cella)
+
+function applyBoardSize(px) {
+  boardSize = Math.max(BOARD_SIZE_MIN, Math.min(BOARD_SIZE_MAX, Math.round(px)));
+  document.documentElement.style.setProperty('--board-size', boardSize + 'px');
+}
+
+function startBoardResize(e) {
+  if (e.button) return;   // left button only
+  e.preventDefault();     // no text selection / native drag while resizing
+  e.stopPropagation();
+  const startX = e.clientX, startY = e.clientY, startSize = boardSize;
+  const onMove = ev => {
+    // Media dei due delta: il drag lungo la diagonale scala 1:1 e la board
+    // resta sempre quadrata (width == height), come <cg-resize> su Lichess.
+    applyBoardSize(startSize + ((ev.clientX - startX) + (ev.clientY - startY)) / 2);
+  };
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+
 // Renderer condiviso della board (partita live E replay): costruisce la griglia
 // 8x8 per una FEN qualsiasi. La partita live vi aggiunge selezione, mosse legali
 // e click-handler; il replay la usa in sola lettura con il proprio orientamento.
@@ -1677,6 +1738,15 @@ function buildBoardEl({ fen, orientation, lastMove = null, selectedSq = null, le
     if (onSquare) div.addEventListener('click', () => onSquare(sq));
     board.appendChild(div);
   }
+
+  // Maniglia di resize: figlia della board ma position:absolute, quindi fuori
+  // dal flusso della griglia (stesso trucco dell'arrow-layer). Ricreata a ogni
+  // render perché la board viene ricostruita da zero — su ogni vista, gratis.
+  const grip = document.createElement('div');
+  grip.className = 'board-resize';
+  grip.title = 'Trascina per ridimensionare la scacchiera';
+  grip.addEventListener('mousedown', startBoardResize);
+  board.appendChild(grip);
 
   return board;
 }
