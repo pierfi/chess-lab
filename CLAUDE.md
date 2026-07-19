@@ -224,13 +224,14 @@ Tabelle DB (già presenti a schema da Fase 3, nessuna migration nuova):
 
 #### Frontend: pannello "Allenamento" (implementato 11 luglio 2026, `frontend/index.html`)
 
-Quarta tab nella topnav (Gioca / **Allenamento** / Storico / Crescita), stesso pattern `showView()` senza router. Tutto nel singolo `index.html`, nessuna modifica al backend. Tre sotto-sezioni:
+Quarta tab nella topnav (Gioca / **Allenamento** / Storico / Crescita), stesso pattern `showView()` senza router. Tutto nel singolo `index.html`, nessuna modifica al backend. Quattro sotto-sezioni:
 
 - **Puzzle solver** (`GET /training/puzzles/next` + `POST /training/puzzles/{id}/answer`): board col renderer condiviso `buildBoardEl()`, orientata su `player_to_move`; interazione click-pezzo→click-destinazione identica alla partita live (riusa `generateMoveCandidates` e `askPromotion` per le promozioni), ma su uno stato separato `training` — la partita live nella vista Gioca non viene toccata. Dopo la risposta la board diventa read-only e la mossa migliore è evidenziata col highlight `.last-move`; feedback corretto/sbagliato + scheduling SRS (prossimo ripasso, streak). Badge sorgente riusa le classi `.badge blunder/mistake/inaccuracy` esistenti. Coda vuota gestita col messaggio del backend + rimando a drill/analisi.
   - **Anti-orfani:** rientrare nella vista NON rifetcha un puzzle ancora senza risposta — ogni `GET /puzzles/next` a coda SRS vuota *genera* un puzzle nuovo dal blunder successivo, e la carta SRS nasce solo alla prima risposta: rifetch indiscriminato orfanerebbe puzzle mai tentati.
 - **Dashboard debolezze** (`GET /training/weaknesses`): barre orizzontali HTML/CSS pure (nessuna libreria, niente SVG qui — più semplice del pattern chart), una sola tinta (`--blue`) per gruppo perché ogni gruppo è una sola serie di magnitudine, larghezza relativa al massimo del proprio gruppo, valore sempre in testo accanto alla barra. Il campo `note` del backend ("temi probabili, non diagnosi certa") è mostrato testualmente sotto le barre.
 - **Drill di finali** (`GET /training/endgames` + `POST /training/endgames/{id}/start`): lista statica con badge obiettivo (Vinci/Patta) e select forza avversario (default 2400 — difesa/attacco quasi-tablebase è il senso didattico del drill). Il player gioca il **lato al tratto sul FEN** del drill (è il lato che ha l'obiettivo); l'avvio ruota nella vista Gioca e riusa il flusso live esistente (`updateState`), nessuna modalità parallela. Refactor minimi a supporto: `resetPlayUi()` estratto da `startGame()` e `requestGameStart(fn)` che generalizza il modal di conferma "partita in corso" a qualsiasi azione di avvio (nuova partita o drill).
 - **Verifica** (stessa tecnica di Fase 3, nessun browser disponibile): `node --check` sullo script; harness `jsdom` che carica il vero `index.html` (unica patch: API→porta di test) e guida i flussi con `fetch()` reali contro un backend isolato (DB scratch via `CHESS_LAB_DB`, porta 8766) popolato da partite vere giocate e analizzate via API — caso coda-vuota su DB fresco, risposta sbagliata e corretta via click sulle caselle, barre debolezze, avvio drill → mossa reale nella vista Gioca → modal di conferma sul secondo drill, drill Philidor col nero al tratto. 93/93 test backend invariati.
+- **Lezioni di teoria** (implementata 19 luglio 2026, `GET /training/lessons` + `/lessons/{id}`, vedi [`docs/theory-lessons-design.md`](docs/theory-lessons-design.md)): strato didattico "a monte" delle altre tre sotto-sezioni — spiega un concetto prima di mettere alla prova. Riusa `buildBoardEl()` + lo **stepping stile replay** (avanti/indietro/inizio/fine, frecce tastiera, autoplay a intervallo fisso che si ferma sempre su uno step `"play"` invece di attraversarlo) per gli step `"show"`, e l'**interazione stile puzzle** (click-pezzo → `generateMoveCandidates()` → click-destinazione, `askPromotion()` per le promozioni) per gli step `"play"` — ma la validazione della mossa "play" è un **confronto UCI lato client** contro `line[idx].uci`, non una chiamata al backend: la soluzione è già nei dati fetchati, a differenza dei puzzle self-generated che devono passare dal server perché non la conoscono. Stato dedicato `lesson`, separato da `state`/`training`/`ext`. Pannello commento/intro sincronizzato con lo step corrente. Bottone "prova nel drill" quando `related_drill_id` è valorizzato (oggi solo `lucena-ponte` → drill `lucena`), riusa `requestGameStart()` esistente — nessun flusso parallelo di avvio partita. **Verifica**: harness jsdom esteso con 24 nuovi check (lista lezioni, apertura/intro, stepping show, mossa sbagliata su uno step play non avanza, mossa giusta avanza, autoplay si ferma sullo step play, completamento, bottone drill assente/presente in base a `related_drill_id`, click sul bottone avvia davvero il drill Lucena con il FEN corretto) — 102/102 check totali, 165/165 test backend invariati.
 
 ---
 
@@ -349,9 +350,10 @@ Giugno 2026
 └── Sett. 23 giu  ████  Fase 5 — statistiche + dashboard  ✅ completato (anticipato in Fase 3)
 
 Luglio 2026
-├── Sett. 30 giu  ████  Fase 6 — puzzle trainer (dataset esterno)
+├── Sett. 30 giu  ████  Fase 6 — puzzle trainer (dataset esterno)  ✅ completato
 ├── Sett. 7 lug   ████  Fase 6 — time control  ✅ completato (anticipato)
-└── Sett. 14 lug  ████  Fase 6 — WebSocket
+├── Sett. 14 lug  ████  Fase 6 — WebSocket  ✅ completato
+└── (fuori roadmap) ██  Fase 4 — lezioni di teoria (backend+contenuto+FE)  ✅ completato 19 luglio 2026
 
 Agosto 2026
 ├── Sett. 4 ago   ████  Fase 7 — coach on-demand (v1)
@@ -695,7 +697,39 @@ Response:  # stesso shape di board_to_state (GET /game/{id}) + endgame_id/goal
   "endgame_id": "kr_vs_k",
   "goal": "win"
 }
+
+# Lezioni di teoria (aggiunte 19 luglio 2026, docs/theory-lessons-design.md):
+# strato didattico "a monte" di puzzle/drill/debolezze. Contenuto statico
+# curato a mano in backend/data/lessons.json (6 lezioni: 2 aperture, 2
+# tattiche, 2 tecniche di finale), read-only, nessuna scrittura DB.
+GET /training/lessons
+Response: {
+  "lessons": [
+    { "id": "italiana-idee", "title": "L'Apertura Italiana: sviluppo e pressione su f7",
+      "category": "opening", "level": "beginner",
+      "summary": "Le idee di base del Giuoco Piano: centro, sviluppo e il punto debole f7." }
+  ]
+}
+
+# Dettaglio con la sequenza di FEN già espansa via python-chess (stesso
+# pattern di GET /game/{id}/replay). Le mosse sono autorate in SAN nel
+# JSON; uci è derivato dal backend, non salvato a mano.
+GET /training/lessons/{lesson_id}
+Response: {
+  "id": "italiana-idee", "title": "...", "category": "opening", "level": "beginner",
+  "orientation": "white", "intro": "...", "start_fen": "rnbqkbnr/.../8 w KQkq - 0 1",
+  "fens": ["<fen dopo 0 mosse>", "..."],   # N+1 FEN, come replay
+  "line": [
+    { "ply": 1, "uci": "e2e4", "san": "e4", "mode": "show", "comment": "..." },
+    { "ply": 5, "uci": "f1c4", "san": "Bc4", "mode": "play",
+      "prompt": "Sviluppa l'alfiere...", "comment": "..." }
+  ],
+  "related_drill_id": "lucena" | null   # collega la lezione al drill omonimo in ENDGAME_DRILLS
+}
+# 404 se lesson_id non esiste.
 ```
+
+**Note non ovvie:** validazione di legalità dell'intera linea SAN fatta al caricamento (fallisce rumorosamente all'avvio se una lezione è malformata, mai in produzione). Il passo "play" viene validato **lato client** con un confronto stringa UCI (nessun endpoint di risposta, la soluzione è già nei dati fetchati) — diverso dai puzzle self-generated, che devono passare dal backend perché non conoscono la soluzione. `related_drill_id` collega `lucena-ponte` al drill `lucena` esistente (stesso FEN); le altre 5 lezioni non hanno drill collegato (`null`). Analisi di design completa: [`docs/theory-lessons-design.md`](docs/theory-lessons-design.md). Percorsi di apprendimento legati all'ELO (idea "da ELO 600 a 1000") sono **solo un documento di design** al momento, non implementati: [`docs/theory-lesson-paths-design.md`](docs/theory-lesson-paths-design.md).
 
 Analisi di design completa (algoritmo SM-2, classificazione fase/tema, formato guida utente): [`docs/training-mode.md`](docs/training-mode.md).
 
