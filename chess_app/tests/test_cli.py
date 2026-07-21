@@ -18,6 +18,7 @@ from cli.backend_client import BackendClient, BackendError, BackendUnavailable
 from cli.config import ADVICE_DEPTH, ADVICE_MULTIPV, FULL_STRENGTH_ELO, elo_to_skill_depth
 from cli.effort import EFFORT_LEVELS, skill_level_for_effort
 from cli.local_engine import LocalEngineAdvisor
+from cli.repl import _announce_game_over, _format_analysis_summary
 from cli.session import CompanionSession, label_threats, turn_prompt_label
 
 
@@ -345,3 +346,230 @@ class TestBackendClient:
         backend = make_unreachable_backend_client()
         with pytest.raises(BackendUnavailable):
             backend.new_companion_game("white", 1200)
+
+
+# ---------------------------------------------------------------------------
+# 6. /pgn — scrittura su file dell'ultimo stato tracciato (Task 3)
+# ---------------------------------------------------------------------------
+
+class TestPgnCommand:
+    def test_pgn_writes_file_with_backends_pgn(self, tmp_path):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        session.register_move("e4")
+
+        out_path = tmp_path / "game.pgn"
+        outcome = session.write_pgn(str(out_path))
+
+        assert outcome["ok"]
+        assert outcome["path"] == str(out_path)
+        written = out_path.read_text(encoding="utf-8")
+        # Stesso contenuto ESATTO del campo "pgn" dell'ultimo stato tracciato
+        # — nessuna trasformazione/ricostruzione locale.
+        assert written == session.last_state["pgn"]
+        assert "1. e4" in written
+        session.close()
+
+    def test_pgn_available_even_before_any_move_is_registered(self, tmp_path):
+        # start() già popola last_state (una companion appena creata ha
+        # comunque un PGN valido, solo senza mosse) — /pgn non deve
+        # richiedere che sia già stata registrata almeno una mossa.
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+
+        outcome = session.write_pgn(str(tmp_path / "game.pgn"))
+
+        assert outcome["ok"]
+        session.close()
+
+    def test_pgn_unavailable_in_degraded_mode(self, tmp_path):
+        backend = make_unreachable_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+
+        target = tmp_path / "game.pgn"
+        outcome = session.write_pgn(str(target))
+
+        assert not outcome["ok"]
+        assert "degrad" in outcome["error"].lower()
+        assert not target.exists()
+
+
+# ---------------------------------------------------------------------------
+# 7. /analyze — chiamata a POST /game/analyze e riepilogo (Task 3)
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeCommand:
+    def test_analyze_calls_backend_with_the_tracked_game_id(self, monkeypatch):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        session.register_move("e4")
+
+        fake_result = {
+            "game_id": session.game_id,
+            "total_moves": 1,
+            "blunders": 1,
+            "mistakes": 0,
+            "inaccuracies": 0,
+            "accuracy_score": 42.0,
+            "moves": [
+                {
+                    "ply": 1, "move_number": 1, "color": "white",
+                    "move_uci": "e2e4", "move_san": "e4",
+                    "best_move_uci": "d2d4", "score_cp": 18,
+                    "loss_cp": 250, "classification": "blunder",
+                },
+            ],
+        }
+        calls = []
+        monkeypatch.setattr(
+            backend, "analyze", lambda game_id: calls.append(game_id) or fake_result
+        )
+
+        outcome = session.analyze()
+
+        assert calls == [session.game_id]
+        assert outcome == {"ok": True, "result": fake_result}
+        session.close()
+
+    def test_analyze_summary_formats_totals_and_flagged_plies(self):
+        result = {
+            "total_moves": 3,
+            "blunders": 1,
+            "mistakes": 1,
+            "inaccuracies": 0,
+            "accuracy_score": 55.5,
+            "moves": [
+                {"ply": 1, "color": "white", "move_san": "e4",
+                 "loss_cp": 0, "classification": "excellent"},
+                {"ply": 2, "color": "black", "move_san": "a6",
+                 "loss_cp": 250, "classification": "blunder"},
+                {"ply": 3, "color": "white", "move_san": "Qh5",
+                 "loss_cp": 90, "classification": "mistake"},
+            ],
+        }
+
+        lines = _format_analysis_summary(result)
+        text = "\n".join(lines)
+
+        assert "Mosse totali: 3" in text
+        assert "Accuracy: 55.5%" in text
+        assert "Blunder: 1  Mistake: 1  Inaccuracy: 0" in text
+        # Solo blunder/mistake elencati (ply 1, "excellent", resta fuori).
+        assert "Ply 2 (black) a6: blunder" in text
+        assert "Ply 3 (white) Qh5: mistake" in text
+        assert "Ply 1" not in text
+
+    def test_analyze_unavailable_in_degraded_mode(self):
+        backend = make_unreachable_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+
+        outcome = session.analyze()
+
+        assert not outcome["ok"]
+        assert "degrad" in outcome["error"].lower()
+
+    def test_analyze_surfaces_backend_400_when_no_moves_played(self):
+        # Nessun mock: il backend reale risponde 400 ("No moves to analyze")
+        # su una companion appena creata — lo stesso messaggio torna in
+        # error, ririportato all'utente così com'è.
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+
+        outcome = session.analyze()
+
+        assert not outcome["ok"]
+        assert outcome["error"]
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 8. Riepilogo automatico di fine partita (Task 3)
+# ---------------------------------------------------------------------------
+
+class TestEndOfGameSummary:
+    FOOLS_MATE = ["f3", "e5", "g4", "Qh4"]  # scacco matto in 4 mosse
+
+    def test_is_game_over_and_move_count_after_checkmate(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+
+        for mv in self.FOOLS_MATE:
+            outcome = session.register_move(mv)
+            assert outcome["ok"], outcome
+
+        assert session.is_game_over()
+        assert session.move_count() == 4
+        session.close()
+
+    def test_announce_game_over_does_not_force_analyze_when_declined(self, monkeypatch):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        for mv in self.FOOLS_MATE:
+            session.register_move(mv)
+
+        analyze_calls = []
+        monkeypatch.setattr(backend, "analyze", lambda game_id: analyze_calls.append(game_id))
+
+        outputs = []
+        _announce_game_over(session, input_func=lambda _prompt: "n", output_func=outputs.append)
+
+        assert any("terminata dopo 4 mosse" in line for line in outputs)
+        assert analyze_calls == []  # l'utente ha rifiutato: nessuna analisi
+        session.close()
+
+    def test_announce_game_over_runs_analyze_when_user_confirms(self, monkeypatch):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        for mv in self.FOOLS_MATE:
+            session.register_move(mv)
+
+        fake_result = {
+            "total_moves": 4, "blunders": 0, "mistakes": 0, "inaccuracies": 0,
+            "accuracy_score": 99.0, "moves": [],
+        }
+        monkeypatch.setattr(backend, "analyze", lambda game_id: fake_result)
+
+        outputs = []
+        _announce_game_over(session, input_func=lambda _prompt: "s", output_func=outputs.append)
+
+        assert any("Accuracy: 99.0%" in line for line in outputs)
+        session.close()
+
+    def test_game_over_detected_locally_in_degraded_mode(self):
+        # Design doc: in degrado non c'è alcuna risposta di stato
+        # server-side da controllare — l'unica fonte è la board locale.
+        backend = make_unreachable_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+
+        for mv in self.FOOLS_MATE:
+            outcome = session.register_move(mv)
+            assert outcome["ok"], outcome
+
+        assert session.is_game_over()
+        assert session.move_count() == 4
+
+    def test_announce_game_over_in_degraded_mode_skips_analyze_prompt(self):
+        backend = make_unreachable_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        for mv in self.FOOLS_MATE:
+            session.register_move(mv)
+
+        def fail_if_called(_prompt):
+            raise AssertionError("non deve chiedere conferma analisi in modalità degradata")
+
+        outputs = []
+        _announce_game_over(session, input_func=fail_if_called, output_func=outputs.append)
+
+        assert any("terminata dopo 4 mosse" in line for line in outputs)
+        assert any("degradata" in line.lower() for line in outputs)

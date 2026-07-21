@@ -8,8 +8,9 @@ di ``backend.main`` — stessa tecnica di ``TestClient``, ma via ``httpx``
 diretto perché la CLI usa già ``httpx`` come dipendenza reale (non solo nei
 test).
 
-Solo gli endpoint companion + threats servono a questo task (Wave 1, design
-doc §8) — niente ``/pgn``/``/analyze`` qui, sono follow-up separati.
+Wave 1 Task 2 aggiungeva solo gli endpoint companion + threats. Wave 1 Task 3
+aggiunge ``analyze`` (``/pgn`` non serve un metodo suo: il PGN è già nel campo
+``pgn`` di ogni risposta di stato companion già gestita qui, vedi ``session.py``).
 """
 
 from __future__ import annotations
@@ -66,6 +67,13 @@ class BackendClient:
 
     def threats(self, game_id: str) -> dict:
         return self._get(f"/game/{game_id}/threats")
+
+    # -- PGN/analisi (Wave 1 Task 3, design doc §5) — riuso puro, zero
+    # endpoint nuovi. Nota: /game/analyze non ha {id} nel path, il game_id
+    # va nel body (vedi AnalyzeRequest in backend/main.py). -----------------
+
+    def analyze(self, game_id: str) -> dict:
+        return self._post("/game/analyze", {"game_id": game_id})
 
     # -- Interno --------------------------------------------------------
 
