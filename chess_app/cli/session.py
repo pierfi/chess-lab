@@ -50,6 +50,14 @@ class CompanionSession:
         # irraggiungibile) — degrado a "consigli sì, PGN/analisi/persistenza
         # no" (design doc §4), mai un crash.
         self.degraded = False
+        # Ultimo dict di stato completo ritornato da start()/register_move()/
+        # undo() (in modalità non degradata) — non solo la board. Serve a
+        # /pgn (campo "pgn") e alla rilevazione di game-over (campo
+        # "is_game_over") SENZA un round-trip HTTP dedicato: ogni risposta di
+        # stato companion li porta già (Task 3, design doc §5). Resta `None`
+        # per tutta la sessione in modalità degradata (nessuna risposta di
+        # stato server-side esiste in quel caso).
+        self.last_state: dict | None = None
 
     def start(self, player_color: str, effort_elo: int, start_fen: str | None = None) -> dict:
         self.player_color = player_color
@@ -59,11 +67,13 @@ class CompanionSession:
             self.degraded = True
             self.game_id = None
             self.board = chess.Board(start_fen) if start_fen else chess.Board()
+            self.last_state = None
             return {"degraded": True}
 
         self.degraded = False
         self.game_id = state["game_id"]
         self.board = chess.Board(state["fen"])
+        self.last_state = state
         return state
 
     def turn_prompt(self) -> str:
@@ -94,6 +104,7 @@ class CompanionSession:
             return {"ok": False, "error": str(exc)}
 
         self.board = chess.Board(state["fen"])
+        self.last_state = state
         return {"ok": True, "state": state}
 
     def undo(self) -> dict:
@@ -110,6 +121,7 @@ class CompanionSession:
             return {"ok": False, "error": str(exc)}
 
         self.board = chess.Board(state["fen"])
+        self.last_state = state
         return {"ok": True, "state": state}
 
     def advice(self) -> dict:
@@ -130,6 +142,68 @@ class CompanionSession:
         except BackendError:
             return None
         return label_threats(raw, self.player_color)
+
+    def write_pgn(self, path: str) -> dict:
+        """Scrive su file il PGN dell'ULTIMO stato tracciato (design doc §5):
+        `_build_pgn` gira lato backend, il campo `pgn` è già in ogni risposta
+        di stato companion — nessuna chiamata HTTP aggiuntiva qui, puro I/O
+        locale. Non disponibile in modalità degradata: senza un record
+        server-side non esiste alcun PGN da scrivere (design doc §4,
+        "consigli sì, PGN/analisi/persistenza no")."""
+        if self.degraded or self.last_state is None:
+            return {
+                "ok": False,
+                "error": (
+                    "PGN non disponibile in modalità degradata "
+                    "(nessuna sessione registrata sul backend)."
+                ),
+            }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.last_state["pgn"])
+        except OSError as exc:
+            return {"ok": False, "error": f"Impossibile scrivere il file '{path}': {exc}"}
+        return {"ok": True, "path": path}
+
+    def analyze(self) -> dict:
+        """Chiama ``POST /game/analyze`` sul ``game_id`` tracciato — riuso
+        puro (design doc §5), nessun endpoint nuovo. Il backend stesso
+        risponde 400 se non è ancora stata registrata alcuna mossa
+        (``move_objects`` vuoto): quel messaggio torna così com'è in
+        ``error``. Non disponibile in modalità degradata: nessun ``game_id``
+        lato server da analizzare."""
+        if self.degraded or self.game_id is None:
+            return {
+                "ok": False,
+                "error": (
+                    "Analisi non disponibile in modalità degradata "
+                    "(nessuna partita registrata sul backend)."
+                ),
+            }
+        try:
+            result = self.backend.analyze(self.game_id)
+        except BackendError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "result": result}
+
+    def is_game_over(self) -> bool:
+        """Riusa il segnale di game-over già confermato dal backend
+        (``last_state["is_game_over"]``), MAI ricalcolato lato client —
+        stessa filosofia del FEN sempre risincronizzato dalla risposta
+        autoritativa. In modalità degradata non esiste nessuna risposta di
+        stato server-side da controllare: l'unica fonte disponibile è la
+        board locale (`python-chess` puro, nessuna chiamata al backend)."""
+        if self.last_state is not None:
+            return bool(self.last_state.get("is_game_over"))
+        return self.board.is_game_over()
+
+    def move_count(self) -> int:
+        """Mosse registrate finora, per il riepilogo di fine partita — dal
+        campo ``move_history`` dell'ultimo stato quando disponibile,
+        altrimenti dalla ``move_stack`` della board locale (degrado)."""
+        if self.last_state is not None:
+            return len(self.last_state["move_history"])
+        return len(self.board.move_stack)
 
     def close(self) -> None:
         self.engine_advisor.close()

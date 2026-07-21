@@ -1,11 +1,13 @@
-"""REPL companion mode — scheletro Wave 1 (design doc §8).
+"""REPL companion mode — scheletro Wave 1 (design doc §8) + Task 3.
 
 Plain ``print``/``input``: niente `rich` in questo task (rifinitura UI è un
-follow-up separato), niente comandi ``/pgn``/``/analyze`` (altro follow-up
-separato). Qui: selezione effort, apertura sessione companion (o degrado
-"solo consigli" se il backend non risponde), loop mossa-per-mossa con
-consiglio dopo ogni mossa registrata, comandi ``/undo``/``/hint``/``/quit``.
-"""
+follow-up separato, Task 4). Qui: selezione effort, apertura sessione
+companion (o degrado "solo consigli" se il backend non risponde), loop
+mossa-per-mossa con consiglio dopo ogni mossa registrata, comandi
+``/undo``/``/hint``/``/pgn``/``/analyze``/``/quit`` + riepilogo automatico di
+fine partita con offerta di analisi on-demand (mai forzata, design doc §5:
+`/game/analyze` resta una chiamata Stockfish esplicita e separata dal
+gameplay, stessa filosofia dell'app principale)."""
 
 from __future__ import annotations
 
@@ -52,6 +54,78 @@ def _print_threats(labeled: dict | None, output_func=print) -> None:
         output_func(f"    {p['square']} ({p['piece']}) attaccato da {attackers}")
 
 
+def _format_pgn_outcome(outcome: dict) -> str:
+    if outcome["ok"]:
+        return f"  PGN scritto in {outcome['path']}."
+    return f"  {outcome['error']}"
+
+
+def _run_pgn(session: CompanionSession, path: str | None, input_func=input, output_func=print) -> None:
+    """Comando ``/pgn`` — accetta il percorso come argomento (``/pgn out.pgn``)
+    o lo richiede interattivamente se omesso. Messaggio di indisponibilità
+    chiaro in modalità degradata (design doc §4), gestito da
+    ``session.write_pgn`` — nessuna logica di degrado duplicata qui."""
+    if path is None:
+        path = input_func("Percorso file di output per il PGN: ").strip()
+    outcome = session.write_pgn(path)
+    output_func(_format_pgn_outcome(outcome))
+
+
+def _format_analysis_summary(result: dict) -> list[str]:
+    """Riepilogo leggibile della risposta di ``POST /game/analyze`` — stesso
+    shape documentato in CLAUDE.md ("Risposta tipo `/game/analyze`"): mosse
+    totali, accuracy, conteggi per classificazione, e il dettaglio dei ply
+    blunder/mistake (ply, SAN, loss_cp) così l'utente vede ESATTAMENTE dove
+    ha sbagliato, non solo un conteggio aggregato."""
+    lines = [
+        f"  Mosse totali: {result['total_moves']}",
+        f"  Accuracy: {result['accuracy_score']:.1f}%",
+        f"  Blunder: {result['blunders']}  Mistake: {result['mistakes']}  Inaccuracy: {result['inaccuracies']}",
+    ]
+    flagged = [m for m in result["moves"] if m["classification"] in ("blunder", "mistake")]
+    if flagged:
+        lines.append("  Da rivedere:")
+        for m in flagged:
+            lines.append(
+                f"    Ply {m['ply']} ({m['color']}) {m['move_san']}: "
+                f"{m['classification']} (-{m['loss_cp']} cp)"
+            )
+    return lines
+
+
+def _run_analyze(session: CompanionSession, output_func=print) -> None:
+    """Comando ``/analyze`` — chiama `POST /game/analyze` (riuso puro,
+    design doc §5) e stampa il riepilogo. Messaggio di indisponibilità
+    chiaro in modalità degradata o partita senza mosse, gestito da
+    ``session.analyze`` (stesso 400 del backend, ririportato così com'è)."""
+    outcome = session.analyze()
+    if not outcome["ok"]:
+        output_func(f"  {outcome['error']}")
+        return
+    for line in _format_analysis_summary(outcome["result"]):
+        output_func(line)
+
+
+def _prompt_yes_no(question: str, input_func=input) -> bool:
+    answer = input_func(question).strip().lower()
+    return answer in ("s", "si", "sì", "y", "yes")
+
+
+def _announce_game_over(session: CompanionSession, input_func=input, output_func=print) -> None:
+    """Riepilogo automatico di fine partita (Task 3): scatta quando la
+    posizione tracciata risulta terminata (`session.is_game_over()`, che
+    riusa il segnale del backend o, in degrado, `chess.Board.is_game_over()`
+    locale — mai una reimplementazione della logica di game-over). L'analisi
+    completa NON parte mai da sola: è una vera ricerca Stockfish, va chiesta
+    esplicitamente, stessa filosofia di `/game/analyze` nel resto dell'app."""
+    output_func(f"Partita terminata dopo {session.move_count()} mosse.")
+    if session.degraded:
+        output_func("  (Analisi non disponibile in modalità degradata.)")
+        return
+    if _prompt_yes_no("Vuoi eseguire l'analisi ora? [s/N] ", input_func):
+        _run_analyze(session, output_func)
+
+
 def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
     output_func("Chess Lab — Companion mode (CLI)")
     output_func("Segui una partita giocata altrove: riporta le mosse, ricevi consigli.")
@@ -73,7 +147,9 @@ def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
     try:
         while True:
             prompt = session.turn_prompt()
-            line = input_func(f"{prompt} (mossa SAN/UCI, o /undo /hint /quit): ").strip()
+            line = input_func(
+                f"{prompt} (mossa SAN/UCI, o /undo /hint /pgn /analyze /quit): "
+            ).strip()
             if not line:
                 continue
             if line == "/quit":
@@ -86,6 +162,14 @@ def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
                 _print_advice(session.advice(), output_func)
                 _print_threats(session.threats(), output_func)
                 continue
+            if line == "/pgn" or line.startswith("/pgn "):
+                parts = line.split(maxsplit=1)
+                arg = parts[1].strip() if len(parts) > 1 else None
+                _run_pgn(session, arg, input_func, output_func)
+                continue
+            if line == "/analyze":
+                _run_analyze(session, output_func)
+                continue
             if line.startswith("/"):
                 output_func("  Comando sconosciuto.")
                 continue
@@ -97,6 +181,9 @@ def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
 
             _print_advice(session.advice(), output_func)
             _print_threats(session.threats(), output_func)
+
+            if session.is_game_over():
+                _announce_game_over(session, input_func, output_func)
     finally:
         session.close()
         output_func("Sessione chiusa.")
