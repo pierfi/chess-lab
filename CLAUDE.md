@@ -47,15 +47,14 @@ narrativa storica — questo file resta focalizzato su ciò che serve per lavora
 | Fase 5 — Analisi avanzata | Eval chart, identificazione apertura ECO, statistiche personali (due voci già coperte dall'anticipo di Fase 3) | ✅ completata 11–18 lug 2026 | [`docs/roadmap.md#fase-5`](docs/roadmap.md#fase-5) |
 | Fase 6 — UX avanzata & real-time | Puzzle trainer da dataset Lichess esterno, time control, aggiornamenti live via WebSocket | ✅ completata 18 lug 2026 | [`docs/roadmap.md#fase-6`](docs/roadmap.md#fase-6) |
 | Fase 7 — Coach Mode (Claude AI) | Coach AI in tempo reale (Claude) durante la partita contro Stockfish, calibrato sull'ELO | 🔲 non iniziata | [`docs/roadmap.md#fase-7`](docs/roadmap.md#fase-7) |
-| Fase 8 — Modalità CLI / Companion | REPL da terminale che segue una partita giocata altrove (Lichess/chess.com/fisica) e consiglia in tempo reale | 🔲 Wave 1: 3/4 task fatti e mergiati, 1 in corso — vedi nota | [`docs/roadmap.md#fase-8`](docs/roadmap.md#fase-8) |
+| Fase 8 — Modalità CLI / Companion | REPL da terminale che segue una partita giocata altrove (Lichess/chess.com/fisica) e consiglia in tempo reale | ✅ Wave 1+2 complete e mergiate 22 lug 2026 | [`docs/roadmap.md#fase-8`](docs/roadmap.md#fase-8) |
 
-**Nota Fase 8 (22 luglio 2026):** 3 dei 4 task Wave 1 sono implementati e già mergiati in `main`
-(backend observer-mode `feature/cli-companion-backend` PR #37, scheletro CLI REPL
-`feature/cli-companion-cli` PR #32, comandi `/pgn`/`/analyze` `feature/cli-companion-cli-commands`
-PR #33 — entrambe le ultime due mergiate il 21 luglio 2026); il quarto (UI `rich`) è in lavorazione in
-parallelo proprio ora su `feature/cli-companion-cli-ui`, non ancora mergiato. Fase 8 resta quindi 🔲
-nel complesso finché non chiude anche quel branch — dettagli completi in
-[`docs/roadmap.md#fase-8`](docs/roadmap.md#fase-8).
+**Nota Fase 8 (22 luglio 2026):** entrambe le wave sono chiuse e mergiate in `main`. Wave 1 (MVP:
+backend observer-mode PR #37, scheletro CLI REPL PR #32, comandi `/pgn`/`/analyze` PR #33, UI `rich`
+PR #38). Wave 2 (resume sessione + input alternativi FEN/PGN PR #40, auto-hint a soglia opt-in PR #39
+— le due branch sono state riconciliate manualmente perché avevano aggiunto indipendentemente il
+proprio argparse in `cli/__main__.py`, poi unificato in un solo parser). Suite CLI: 296/296 test
+verdi. Dettagli completi in [`docs/roadmap.md#fase-8`](docs/roadmap.md#fase-8).
 
 Timeline riassuntiva mese-per-mese: [`docs/roadmap.md#timeline`](docs/roadmap.md#timeline).
 

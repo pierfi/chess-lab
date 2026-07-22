@@ -324,7 +324,7 @@ Analisi completa di design in [`docs/coach-mode.md`](docs/coach-mode.md).
 ---
 
 <a id="fase-8"></a>
-### 🔲 Fase 8 — Modalità CLI / Companion
+### ✅ Fase 8 — Modalità CLI / Companion — Wave 1+2 completate 22 luglio 2026
 **Target: settembre/ottobre 2026 · ~3 settimane · ~16.5 ore**
 
 Obiettivo: un compagno da terminale (REPL stile `claude`) che segue una partita giocata **altrove**
@@ -338,27 +338,33 @@ Analisi completa di design in [`docs/cli-companion-mode-design.md`](docs/cli-com
 
 **Wave 1 — MVP companion (~11 ore):**
 
-**Nota di stato (22 luglio 2026): 3 dei 4 task Wave 1 sono implementati e già mergiati in `main`** —
-`feature/cli-companion-backend` (PR #37), `feature/cli-companion-cli` (PR #32, mergiata 21 luglio
-2026) e `feature/cli-companion-cli-commands` (PR #33, mergiata 21 luglio 2026). Il quarto task (UI
-`rich`) è in lavorazione in parallelo proprio ora su `feature/cli-companion-cli-ui`, non ancora
-mergiato — resta l'unico 🔲 della tabella, e per questo Fase 8 nel suo complesso resta 🔲 finché non
-chiude anche quello.
+**Nota di stato (22 luglio 2026): entrambe le wave sono chiuse, tutti i task implementati e mergiati
+in `main`.** Wave 1: `feature/cli-companion-backend` (PR #37), `feature/cli-companion-cli` (PR #32,
+21 luglio 2026), `feature/cli-companion-cli-commands` (PR #33, 21 luglio 2026), UI `rich`
+`feature/cli-companion-cli-ui` (PR #38, 22 luglio 2026, `rich==15.0.0`, 236/236 test verdi). Wave 2:
+`feature/cli-companion-wave2-bootstrap` (resume + input alternativi) e
+`feature/cli-companion-wave2-autohint` (auto-hint a soglia) sono stati sviluppati in parallelo da due
+subagent indipendenti e avevano aggiunto **ciascuno il proprio argparse** in `cli/__main__.py` —
+riconciliati manualmente in un merge di integrazione (`feature/cli-companion-wave2`, PR #40) in un
+solo `ArgumentParser`: `--resume`/`--fen`/`--pgn`/`--pgn-file` restano mutuamente esclusivi tra loro,
+`--auto-hint-threshold` è un flag indipendente componibile con uno qualsiasi dei tre. Suite CLI finale:
+**296/296 test verdi** (236 Wave 1 + 25 bootstrap + 33 auto-hint + 2 test di composizione aggiunti in
+fase di merge).
 
 | Settimana | Attività | Ore stimate | Modello suggerito | Stato |
 |-----------|----------|-------------|-------------------|-------|
 | — | Backend observer-mode: `source="companion"` (nessuna migration), endpoint `POST /game/companion/new` + `POST /game/{id}/companion/move` (SAN, riconosce anche UCI non ambiguo) + `POST /game/{id}/companion/undo`, loop di append estratto e condiviso con `/games/import` | ~3 ore | Opus | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-backend`, PR #37) |
 | — | CLI: scheletro REPL in `chess_app/cli/`, selezione effort→Skill (riusa `games.engine_elo`), Stockfish locale long-lived per i consigli, client di mirroring verso il backend, loop di consiglio con UX della mossa divergente | ~4 ore | Opus | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-cli`, PR #32, 21 luglio 2026) |
 | — | CLI: comandi `/pgn` e `/analyze` (mirror di endpoint esistenti) + riepilogo errori a fine partita | ~2 ore | Sonnet | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-cli-commands`, PR #33, 21 luglio 2026; 219/219 test verdi alla verifica del 22 luglio 2026) |
-| — | UI `rich`: spinner ricerca, pannelli eval/mossa migliore in place, evidenza "in presa"; nuova dipendenza in `requirements.txt` | ~2 ore | Sonnet | 🔲 in lavorazione in parallelo su branch `feature/cli-companion-cli-ui` — non ancora mergiato, stato di completamento non noto a questo momento |
+| — | UI `rich`: spinner ricerca, pannelli eval/mossa migliore in place, evidenza "in presa"; nuova dipendenza in `requirements.txt` | ~2 ore | Sonnet | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-cli-ui`, PR #38, 22 luglio 2026; `rich==15.0.0`; 236/236 test verdi, verificati direttamente) |
 
 **Wave 2 — promosse dal backlog di design (~5.5 ore):**
 
 | Settimana | Attività | Ore stimate | Modello suggerito | Stato |
 |-----------|----------|-------------|-------------------|-------|
-| — | Salva/riprendi una sessione companion interrotta (`--resume <game_id>`, riusa `GET /game/{id}` + cache-miss) | ~1.5 ore | Sonnet | 🔲 |
-| — | Metodi di input alternativi: incollare una FEN (`start_fen`) o un PGN parziale come punto di partenza della sessione | ~2 ore | Sonnet | 🔲 |
-| — | Auto-hint con soglia (opt-in): consiglio mostrato automaticamente solo oltre una soglia di cp loss (es. −150cp) | ~2 ore | Sonnet | 🔲 |
+| — | Salva/riprendi una sessione companion interrotta (`--resume <game_id>`, riusa `GET /game/{id}` + cache-miss) | ~1.5 ore | Sonnet | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-wave2-bootstrap`, integrata via PR #40) |
+| — | Metodi di input alternativi: incollare una FEN (`start_fen`) o un PGN parziale come punto di partenza della sessione | ~2 ore | Sonnet | ✅ fatto e mergiato in `main` (stesso branch/PR di sopra — `--fen`/`--pgn`/`--pgn-file`, bootstrap client-side via `cli/pgn_bootstrap.py`, nessun endpoint nuovo) |
+| — | Auto-hint con soglia (opt-in): consiglio mostrato automaticamente solo oltre una soglia di cp loss (es. −150cp) | ~2 ore | Sonnet | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-wave2-autohint`, PR #39, 22 luglio 2026; `--auto-hint-threshold`, default invariato) |
 
 **Dipendenze:** nessuna sulle fasi precedenti — riusa endpoint già esistenti (`/hint`, `/threats`,
 `/game/analyze`, `_build_pgn`, ECO book) senza modificarli. Indipendente da Fase 7, collocabile prima
