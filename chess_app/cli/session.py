@@ -76,6 +76,42 @@ class CompanionSession:
         self.last_state = state
         return state
 
+    def resume(self, game_id: str) -> dict:
+        """Riprende una sessione companion INTERROTTA (Wave 2, design doc
+        §11.6/roadmap Fase 8 Wave 2) — parallelo a ``start()``, ma da
+        ``GET /game/{id}`` invece che da ``POST /game/companion/new``. Quel
+        GET è lo stesso endpoint usato dal frontend web e gestisce già lato
+        server il path cache-miss/reload-da-DB (``_get_game()``/
+        ``_load_game_from_db()`` in ``backend/main.py``): qui serve solo
+        interrogarlo e rehydratare lo stato locale (``fen``, ``player_color``,
+        lo stato completo come ``last_state``) — nessuna logica di
+        ricostruzione duplicata.
+
+        Il backend non distingue "companion" da qualunque altra partita per
+        questo endpoint (``GET /game/{id}`` risponde a un id qualsiasi,
+        ``source`` non è nemmeno nella risposta) — coerente con
+        ``POST /game/{id}/companion/move``, che allo stesso modo non verifica
+        la provenienza della partita. Il chiamante è responsabile di passare
+        un ``game_id`` che ha senso da riprendere in questa modalità.
+
+        A DIFFERENZA di ``start()``, qui un backend irraggiungibile NON
+        degrada a modalità "solo consigli": ``start()`` può degradare perché
+        ha un fallback sensato (board vuota o dallo ``start_fen`` esplicito
+        dell'utente). Un resume non ha alcun fallback sensato — non conosciamo
+        FEN/colore/cronologia della sessione interrotta senza contattare il
+        backend, quindi assumere silenziosamente la posizione standard
+        sarebbe attivamente fuorviante. ``BackendError`` (404, id inesistente)
+        e ``BackendUnavailable`` si propagano al chiamante COSÌ COME SONO:
+        sta alla REPL (``repl._resume_session``) tradurli in un messaggio
+        chiaro e un'uscita pulita, mai in un crash."""
+        state = self.backend.get_game(game_id)
+        self.player_color = state["player_color"]
+        self.degraded = False
+        self.game_id = state["game_id"]
+        self.board = chess.Board(state["fen"])
+        self.last_state = state
+        return state
+
     def turn_prompt(self) -> str:
         return turn_prompt_label(self.board, self.player_color)
 

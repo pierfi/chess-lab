@@ -68,6 +68,16 @@ class BackendClient:
     def threats(self, game_id: str) -> dict:
         return self._get(f"/game/{game_id}/threats")
 
+    # -- Resume di una sessione interrotta (Wave 2, design doc §11.6) -------
+    # Riusa GET /game/{id} — LO STESSO endpoint del frontend web (CLAUDE.md
+    # "Risposta tipo board_to_state"), che gestisce già lato server il path
+    # cache-miss/reload-da-DB (_get_game()/_load_game_from_db() in
+    # backend/main.py). Nessuna logica di ricostruzione duplicata qui: solo
+    # l'HTTP GET, come ogni altro metodo di questa classe.
+
+    def get_game(self, game_id: str) -> dict:
+        return self._get(f"/game/{game_id}")
+
     # -- PGN/analisi (Wave 1 Task 3, design doc §5) — riuso puro, zero
     # endpoint nuovi. Nota: /game/analyze non ha {id} nel path, il game_id
     # va nel body (vedi AnalyzeRequest in backend/main.py). -----------------

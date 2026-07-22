@@ -1,5 +1,6 @@
 """REPL companion mode — scheletro Wave 1 (design doc §8) + Task 3 + Task 4
-(UI ``rich``, design doc §7).
+(UI ``rich``, design doc §7) + Wave 2 (design doc §11.6/roadmap Fase 8
+Wave 2: resume di una sessione interrotta, avvio da FEN/PGN parziale).
 
 Selezione effort, apertura sessione companion (o degrado "solo consigli" se
 il backend non risponde), loop mossa-per-mossa con consiglio dopo ogni mossa
@@ -15,17 +16,21 @@ appoggia alle sue funzioni. Le due funzioni già coperte da test con il
 pattern ``output_func``/``input_func`` (``_format_analysis_summary``,
 ``_announce_game_over``) restano puro testo, INVARIATE — nessun rischio per
 quei test, coerente con la scelta di non introdurre `rich` dove non serve
-(il riepilogo di fine partita è testo semplice, non un pannello dal vivo)."""
+(il riepilogo di fine partita è testo semplice, non un pannello dal vivo).
+
+``run()`` accetta ora ``resume_game_id``/``start_fen`` (parsing/validazione
+di argv, incluso il PGN parziale, fatti a monte in ``__main__.py`` — qui
+sono già valori pronti all'uso, mai testo grezzo da riparsare)."""
 
 from __future__ import annotations
 
 from rich.console import Console
 
 from . import ui
-from .backend_client import BackendClient
+from .backend_client import BackendClient, BackendError, BackendUnavailable
 from .config import BASE_URL
 from .effort import prompt_effort_choice, skill_level_for_effort
-from .local_engine import open_local_engine
+from .local_engine import LocalEngineAdvisor, open_local_engine
 from .session import CompanionSession
 
 
@@ -125,25 +130,97 @@ def _announce_game_over(session: CompanionSession, input_func=input, output_func
         _run_analyze(session, output_func)
 
 
-def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
+def _resume_session(
+    game_id: str,
+    base_url: str = BASE_URL,
+    output_func=print,
+    backend: BackendClient | None = None,
+    engine_advisor: LocalEngineAdvisor | None = None,
+) -> CompanionSession | None:
+    """Riprende una sessione companion interrotta (Wave 2). Ritorna la
+    ``CompanionSession`` pronta all'uso, oppure ``None`` se il resume non è
+    possibile — in quel caso ha già stampato un messaggio d'errore chiaro e
+    ripulito ogni risorsa aperta (nessun crash, nessuna risorsa leaked).
+
+    ``backend``/``engine_advisor`` sono iniettabili (default ``None`` →
+    costruiti qui) per gli stessi motivi per cui lo sono altrove nel
+    pacchetto (``BackendClient(client=...)``, ``LocalEngineAdvisor(engine=...)``):
+    permettono di testare questa funzione con un backend in-process
+    (ASGITransport) e un motore stub, senza spawnare un vero Stockfish o
+    aprire un vero socket.
+
+    Effort per il motore locale: NON ri-chiesto all'utente. ``engine_elo``
+    del record ripreso È l'effort scelto l'ultima volta (persistito 1:1 in
+    ``games.engine_elo`` da ``POST /game/companion/new``, vedi
+    ``backend/main.py``) — non solo un "default ragionevole": ririchiederlo
+    sarebbe pura frizione senza alcun guadagno, quindi si riusa direttamente.
+
+    Nota implementativa: viene fatta UNA chiamata GET di "peek" (per
+    conoscere ``engine_elo`` PRIMA di aprire il motore locale con lo Skill
+    Level giusto) più quella interna a ``CompanionSession.resume()`` — due
+    GET invece di uno. Entrambe read-only, senza alcuna ricerca Stockfish
+    lato server (costo trascurabile), a fronte di un ``CompanionSession.resume()``
+    che resta autosufficiente e testabile in isolamento (design doc §11.6)."""
+    if backend is None:
+        backend = BackendClient(base_url=base_url)
+    try:
+        peek_state = backend.get_game(game_id)
+    except (BackendError, BackendUnavailable) as exc:
+        output_func(f"Impossibile riprendere la partita '{game_id}': {exc}")
+        backend.close()
+        return None
+
+    if engine_advisor is None:
+        engine_advisor = open_local_engine(skill_level_for_effort(peek_state["engine_elo"]))
+    session = CompanionSession(backend, engine_advisor)
+    try:
+        session.resume(game_id)
+    except (BackendError, BackendUnavailable) as exc:
+        output_func(f"Impossibile riprendere la partita '{game_id}': {exc}")
+        session.close()
+        return None
+
+    output_func(
+        f"Sessione companion ripresa (game_id={session.game_id}, "
+        f"{session.move_count()} mosse già registrate)."
+    )
+    return session
+
+
+def run(
+    base_url: str = BASE_URL,
+    input_func=input,
+    output_func=print,
+    resume_game_id: str | None = None,
+    start_fen: str | None = None,
+) -> None:
     console = Console()
 
     output_func("Chess Lab — Companion mode (CLI)")
     output_func("Segui una partita giocata altrove: riporta le mosse, ricevi consigli.")
 
-    player_color = _prompt_player_color(input_func, output_func)
-    effort_elo = prompt_effort_choice(input_func, output_func)
-
-    backend = BackendClient(base_url=base_url)
-    engine_advisor = open_local_engine(skill_level_for_effort(effort_elo))
-    session = CompanionSession(backend, engine_advisor)
-
-    session.start(player_color, effort_elo)
-    if session.degraded:
-        output_func("Impossibile contattare il backend: modalità solo-consigli.")
-        output_func("PGN/storico/analisi non saranno disponibili in questa sessione.")
+    if resume_game_id is not None:
+        # Wave 2: resume salta i prompt colore/effort (già noti dalla partita
+        # ripresa, vedi _resume_session) — nessun start_fen qui, sarebbe
+        # incoerente con "riprendi la partita X" (start_fen è solo per una
+        # sessione NUOVA, mutuamente esclusivo con --resume in __main__.py).
+        session = _resume_session(resume_game_id, base_url, output_func)
+        if session is None:
+            return
     else:
-        output_func(f"Sessione companion creata (game_id={session.game_id}).")
+        player_color = _prompt_player_color(input_func, output_func)
+        effort_elo = prompt_effort_choice(input_func, output_func)
+
+        backend = BackendClient(base_url=base_url)
+        engine_advisor = open_local_engine(skill_level_for_effort(effort_elo))
+        session = CompanionSession(backend, engine_advisor)
+
+        session.start(player_color, effort_elo, start_fen=start_fen)
+        if session.degraded:
+            output_func("Impossibile contattare il backend: modalità solo-consigli.")
+            output_func("PGN/storico/analisi non saranno disponibili in questa sessione.")
+        else:
+            output_func(f"Sessione companion creata (game_id={session.game_id}).")
 
     try:
         while True:
