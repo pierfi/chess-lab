@@ -205,6 +205,25 @@ class CompanionSession:
             return len(self.last_state["move_history"])
         return len(self.board.move_stack)
 
+    def move_history_san(self) -> list[str]:
+        """SAN della cronologia mosse, per la lista mosse stilizzata (Task 4,
+        ``ui.render_move_list``). In modalità non degradata è già nel campo
+        ``move_history_san`` dell'ultimo stato (calcolato dal backend); in
+        degrado si ricostruisce localmente rigiocando dalla posizione
+        iniziale (``board.root()``) — pura ``python-chess``, nessuna
+        chiamata HTTP. Scelta di derivarla sempre da zero invece che tenere
+        un accumulatore separato: `self.board` è già la fonte di verità
+        risincronizzata ad ogni mossa (vedi docstring di modulo), quindi non
+        c'è alcun rischio di drift fra le due rappresentazioni."""
+        if self.last_state is not None:
+            return list(self.last_state["move_history_san"])
+        replay = self.board.root()
+        sans = []
+        for move in self.board.move_stack:
+            sans.append(replay.san(move))
+            replay.push(move)
+        return sans
+
     def close(self) -> None:
         self.engine_advisor.close()
         self.backend.close()

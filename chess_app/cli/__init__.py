@@ -14,9 +14,11 @@ standalone che duplica il backend. Due responsabilità nettamente separate:
     via HTTP (persistenza/PGN/analisi/pezzi-in-presa — non latenza-sensibile,
     logica server sostanziale da riusare, non duplicare).
 
-Wave 1 (questo package): REPL scheletro, effort→Skill, motore locale,
-mirroring HTTP, loop di consiglio. Fuori scope qui: comandi `/pgn`/`/analyze`
-e rifinitura UI con `rich` (follow-up separati, vedi design doc §8/§9).
+Wave 1 (questo package, completo): REPL scheletro, effort→Skill, motore
+locale, mirroring HTTP, loop di consiglio, comandi `/pgn`/`/analyze` +
+riepilogo di fine partita, rifinitura UI con `rich` (spinner di ricerca,
+pannelli eval/mossa migliore/candidate, pezzi in presa a colori, lista mosse
+stilizzata — vedi `ui.py`, unico modulo che importa `rich`).
 
 Eseguibile come `python -m chess_app.cli` (vedi `__main__.py`).
 """
