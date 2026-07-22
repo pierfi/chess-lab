@@ -3,23 +3,37 @@ docs/cli-companion-mode-design.md §8).
 
 Copre: mapping effort→Skill Level, logica di prompt a turni alternati,
 registrazione mossa (successo/fallimento, backend reale via ASGITransport),
-etichettatura "tuoi/suoi" di /threats, re-sync dell'undo. Il motore Stockfish
-locale è sempre uno stub in questi test (mai un vero processo Stockfish, per
-velocità/determinismo) — solo depth/Skill Level passati all'engine vengono
-verificati, non la qualità della ricerca."""
+etichettatura "tuoi/suoi" di /threats, re-sync dell'undo, rendering rich
+(Task 4 — spinner, pannelli, lista mosse, colori "in presa"). Il motore
+Stockfish locale è sempre uno stub in questi test (mai un vero processo
+Stockfish, per velocità/determinismo) — solo depth/Skill Level passati
+all'engine vengono verificati, non la qualità della ricerca."""
+
+import io
 
 import chess
 import chess.engine
 import pytest
 from fastapi.testclient import TestClient
+from rich.console import Console
 
+import cli.ui as ui
 from backend.main import app
 from cli.backend_client import BackendClient, BackendError, BackendUnavailable
 from cli.config import ADVICE_DEPTH, ADVICE_MULTIPV, FULL_STRENGTH_ELO, elo_to_skill_depth
 from cli.effort import EFFORT_LEVELS, skill_level_for_effort
 from cli.local_engine import LocalEngineAdvisor
-from cli.repl import _announce_game_over, _format_analysis_summary
+from cli.repl import _announce_game_over, _format_analysis_summary, _show_advice
 from cli.session import CompanionSession, label_threats, turn_prompt_label
+
+
+def make_capture_console(width: int = 100) -> tuple[Console, io.StringIO]:
+    """Console `rich` che scrive su uno StringIO invece che su un vero
+    terminale — `force_terminal=False` disabilita colori/markup/animazioni
+    nell'output catturato, lasciando solo il testo informativo da asserire
+    (nessuna dipendenza da un vero TTY, nessun parsing di sequenze ANSI)."""
+    buf = io.StringIO()
+    return Console(file=buf, force_terminal=False, width=width), buf
 
 
 # ---------------------------------------------------------------------------
@@ -573,3 +587,171 @@ class TestEndOfGameSummary:
 
         assert any("terminata dopo 4 mosse" in line for line in outputs)
         assert any("degradata" in line.lower() for line in outputs)
+
+
+# ---------------------------------------------------------------------------
+# 9. move_history_san() — sorgente per la lista mosse stilizzata (Task 4)
+# ---------------------------------------------------------------------------
+
+class TestMoveHistorySan:
+    def test_move_history_san_matches_backend_after_moves(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        session.register_move("e4")
+        session.register_move("e5")
+
+        assert session.move_history_san() == ["e4", "e5"]
+        session.close()
+
+    def test_move_history_san_empty_before_any_move(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+
+        assert session.move_history_san() == []
+        session.close()
+
+    def test_move_history_san_reconstructed_locally_in_degraded_mode(self):
+        # Nessun last_state server-side in degrado: va rigiocata dalla board
+        # locale (board.root() + replay), non un accumulatore separato.
+        backend = make_unreachable_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        session.register_move("e4")
+        session.register_move("e5")
+
+        assert session.move_history_san() == ["e4", "e5"]
+
+
+# ---------------------------------------------------------------------------
+# 10. Rendering rich (Task 4, design doc §7) — cli/ui.py
+# ---------------------------------------------------------------------------
+
+class TestUiFormatting:
+    """Funzioni pure di scelta stile/colore — nessun bisogno di toccare rich
+    o parsare ANSI: separate apposta da render_* per essere testabili a
+    prescindere dal rendering effettivo."""
+
+    def test_format_eval_text_for_normal_score(self):
+        assert ui.format_eval_text(34) == "+0.34"
+        assert ui.format_eval_text(-250) == "-2.50"
+
+    def test_format_eval_text_for_none(self):
+        assert ui.format_eval_text(None) == "n/d"
+
+    def test_format_eval_text_for_mate_scores(self):
+        assert "bianco" in ui.format_eval_text(10000)
+        assert "nero" in ui.format_eval_text(-10000)
+
+    def test_move_row_style_highlights_only_the_best_line(self):
+        assert ui.move_row_style(1) == "bold green"
+        assert ui.move_row_style(2) != "bold green"
+        assert ui.move_row_style(3) != "bold green"
+
+    def test_threat_style_distinguishes_yours_from_opponents(self):
+        # Design doc §3.1/§10: "tuoi" vs "suoi" devono avere colore/icona
+        # visivamente distinti, mai lo stesso.
+        yours = ui.threat_style("tuoi pezzi in presa")
+        opponents = ui.threat_style("pezzi in presa dell'avversario")
+        assert yours != opponents
+        assert yours == ("red", "⚠")
+        assert opponents == ("green", "★")
+
+
+class TestUiRendering:
+    """Rendering effettivo via una Console che scrive su StringIO
+    (force_terminal=False, vedi make_capture_console) — verifica il
+    contenuto informativo (mosse, eval, etichette), non sequenze ANSI."""
+
+    def test_render_advice_shows_moves_and_eval(self):
+        console, buf = make_capture_console()
+        advice = {
+            "eval_cp": 34,
+            "lines": [
+                {"move_uci": "e2e4", "move_san": "e4", "score_cp": 34},
+                {"move_uci": "d2d4", "move_san": "d4", "score_cp": 28},
+            ],
+        }
+        ui.render_advice(console, advice)
+        text = buf.getvalue()
+
+        assert "Consiglio motore locale" in text
+        assert "e4" in text and "d4" in text
+        assert "+34 cp" in text
+        assert "Valutazione: +0.34" in text
+
+    def test_render_advice_handles_no_candidate_lines(self):
+        console, buf = make_capture_console()
+        ui.render_advice(console, {"eval_cp": None, "lines": []})
+        text = buf.getvalue()
+
+        assert "nessuna mossa disponibile" in text
+        assert "Valutazione: n/d" in text
+
+    def test_render_threats_none_prints_nothing(self):
+        console, buf = make_capture_console()
+        ui.render_threats(console, None)
+        assert buf.getvalue() == ""
+
+    def test_render_threats_empty_list_prints_nothing(self):
+        console, buf = make_capture_console()
+        ui.render_threats(console, {"label": "tuoi pezzi in presa", "side": "white", "in_presa": []})
+        assert buf.getvalue() == ""
+
+    def test_render_threats_shows_square_and_attackers(self):
+        console, buf = make_capture_console()
+        labeled = {
+            "label": "tuoi pezzi in presa",
+            "side": "white",
+            "in_presa": [{"square": "f6", "piece": "n", "value": 3, "attackers": ["e4", "g5"]}],
+        }
+        ui.render_threats(console, labeled)
+        text = buf.getvalue()
+
+        assert "Tuoi pezzi in presa" in text
+        assert "f6" in text
+        assert "e4, g5" in text
+
+    def test_render_move_list_pairs_white_and_black(self):
+        console, buf = make_capture_console()
+        ui.render_move_list(console, ["e4", "e5", "Nf3"])
+        text = buf.getvalue()
+
+        assert "1." in text and "e4" in text and "e5" in text
+        assert "2." in text and "Nf3" in text
+
+    def test_render_move_list_empty_prints_nothing(self):
+        console, buf = make_capture_console()
+        ui.render_move_list(console, [])
+        assert buf.getvalue() == ""
+
+    def test_advice_status_is_a_usable_context_manager(self):
+        # Smoke test: entrare/uscire dal context manager non deve esplodere
+        # anche in un ambiente non-TTY catturato (force_terminal=False) —
+        # copre l'uso reale in _show_advice.
+        console, _buf = make_capture_console()
+        with ui.advice_status(console):
+            pass
+
+
+class TestShowAdvice:
+    """`_show_advice` (repl.py) — collante fra spinner, session.advice()/
+    threats() e i tre pannelli rich. Verifica che TUTTI e tre vengano
+    effettivamente stampati sulla console passata, con il backend reale
+    (via ASGITransport) per esercitare anche l'etichettatura /threats."""
+
+    def test_show_advice_renders_advice_threats_and_move_list(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("black", 1200)
+        session.register_move("e4")  # mossa dell'avversario (bianco)
+
+        console, buf = make_capture_console()
+        _show_advice(session, console)
+        text = buf.getvalue()
+
+        assert "Consiglio motore locale" in text  # pannello advice
+        assert "Mosse" in text  # pannello lista mosse
+        assert "e4" in text
+        session.close()

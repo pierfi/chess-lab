@@ -1,16 +1,27 @@
-"""REPL companion mode — scheletro Wave 1 (design doc §8) + Task 3.
+"""REPL companion mode — scheletro Wave 1 (design doc §8) + Task 3 + Task 4
+(UI ``rich``, design doc §7).
 
-Plain ``print``/``input``: niente `rich` in questo task (rifinitura UI è un
-follow-up separato, Task 4). Qui: selezione effort, apertura sessione
-companion (o degrado "solo consigli" se il backend non risponde), loop
-mossa-per-mossa con consiglio dopo ogni mossa registrata, comandi
-``/undo``/``/hint``/``/pgn``/``/analyze``/``/quit`` + riepilogo automatico di
-fine partita con offerta di analisi on-demand (mai forzata, design doc §5:
-`/game/analyze` resta una chiamata Stockfish esplicita e separata dal
-gameplay, stessa filosofia dell'app principale)."""
+Selezione effort, apertura sessione companion (o degrado "solo consigli" se
+il backend non risponde), loop mossa-per-mossa con consiglio dopo ogni mossa
+registrata, comandi ``/undo``/``/hint``/``/pgn``/``/analyze``/``/quit`` +
+riepilogo automatico di fine partita con offerta di analisi on-demand (mai
+forzata, design doc §5: `/game/analyze` resta una chiamata Stockfish
+esplicita e separata dal gameplay, stessa filosofia dell'app principale).
+
+Il rendering del loop di consiglio (spinner, pannello eval/mossa migliore,
+lista mosse, pezzi in presa a colori) è isolato in ``ui.py`` (unico modulo
+che importa ``rich``): qui si costruisce un ``rich.console.Console`` e ci si
+appoggia alle sue funzioni. Le due funzioni già coperte da test con il
+pattern ``output_func``/``input_func`` (``_format_analysis_summary``,
+``_announce_game_over``) restano puro testo, INVARIATE — nessun rischio per
+quei test, coerente con la scelta di non introdurre `rich` dove non serve
+(il riepilogo di fine partita è testo semplice, non un pannello dal vivo)."""
 
 from __future__ import annotations
 
+from rich.console import Console
+
+from . import ui
 from .backend_client import BackendClient
 from .config import BASE_URL
 from .effort import prompt_effort_choice, skill_level_for_effort
@@ -28,30 +39,18 @@ def _prompt_player_color(input_func=input, output_func=print) -> str:
         output_func("Rispondi 'w' o 'b'.")
 
 
-def _format_eval(eval_cp: int | None) -> str:
-    if eval_cp is None:
-        return "n/d"
-    if abs(eval_cp) >= 10000:
-        return "matto in vista per il bianco" if eval_cp > 0 else "matto in vista per il nero"
-    return f"{eval_cp / 100:+.2f}"
-
-
-def _print_advice(advice: dict, output_func=print) -> None:
-    output_func(f"  Valutazione: {_format_eval(advice['eval_cp'])}")
-    for i, line in enumerate(advice["lines"], start=1):
-        output_func(f"  {i}. {line['move_san']} ({line['score_cp']:+d} cp)")
-
-
-def _print_threats(labeled: dict | None, output_func=print) -> None:
-    if labeled is None:
-        return
-    pieces = labeled["in_presa"]
-    if not pieces:
-        return
-    output_func(f"  Attenzione — {labeled['label']}:")
-    for p in pieces:
-        attackers = ", ".join(p["attackers"])
-        output_func(f"    {p['square']} ({p['piece']}) attaccato da {attackers}")
+def _show_advice(session: CompanionSession, console: Console) -> None:
+    """Spinner mentre il motore locale calcola + pannello eval/mossa
+    migliore/candidate + pezzi in presa a colori + lista mosse stilizzata
+    (Task 4, design doc §7). Unico punto della REPL che tocca il rendering
+    rich per il loop di consiglio — chiamato dopo ogni mossa registrata e da
+    ``/hint``."""
+    with ui.advice_status(console):
+        advice = session.advice()
+        threats = session.threats()
+    ui.render_advice(console, advice)
+    ui.render_threats(console, threats)
+    ui.render_move_list(console, session.move_history_san())
 
 
 def _format_pgn_outcome(outcome: dict) -> str:
@@ -127,6 +126,8 @@ def _announce_game_over(session: CompanionSession, input_func=input, output_func
 
 
 def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
+    console = Console()
+
     output_func("Chess Lab — Companion mode (CLI)")
     output_func("Segui una partita giocata altrove: riporta le mosse, ricevi consigli.")
 
@@ -159,8 +160,7 @@ def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
                 output_func(f"  {outcome['error']}" if not outcome["ok"] else "  Mossa annullata.")
                 continue
             if line == "/hint":
-                _print_advice(session.advice(), output_func)
-                _print_threats(session.threats(), output_func)
+                _show_advice(session, console)
                 continue
             if line == "/pgn" or line.startswith("/pgn "):
                 parts = line.split(maxsplit=1)
@@ -179,8 +179,7 @@ def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
                 output_func(f"  {outcome['error']}")
                 continue
 
-            _print_advice(session.advice(), output_func)
-            _print_threats(session.threats(), output_func)
+            _show_advice(session, console)
 
             if session.is_game_over():
                 _announce_game_over(session, input_func, output_func)
