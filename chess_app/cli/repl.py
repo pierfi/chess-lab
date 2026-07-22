@@ -1,6 +1,7 @@
 """REPL companion mode — scheletro Wave 1 (design doc §8) + Task 3 + Task 4
-(UI ``rich``, design doc §7) + Wave 2 "auto-hint con soglia" (opt-in, design
-doc §10).
+(UI ``rich``, design doc §7) + Wave 2 (design doc §11.6/roadmap Fase 8 Wave 2:
+resume di una sessione interrotta, avvio da FEN/PGN parziale, "auto-hint con
+soglia" opt-in).
 
 Selezione effort, apertura sessione companion (o degrado "solo consigli" se
 il backend non risponde), loop mossa-per-mossa con consiglio dopo ogni mossa
@@ -18,20 +19,22 @@ pattern ``output_func``/``input_func`` (``_format_analysis_summary``,
 quei test, coerente con la scelta di non introdurre `rich` dove non serve
 (il riepilogo di fine partita è testo semplice, non un pannello dal vivo).
 
-**Wave 2 — modalità silenziosa a soglia (``auto_hint_threshold``, opt-in).**
-Default (``None``, parametro omesso): comportamento storico INVARIATO al
-carattere — pannello completo dopo OGNI mossa, chiunque l'abbia giocata
+``run()`` accetta ``resume_game_id``/``start_fen`` (parsing/validazione di
+argv, incluso il PGN parziale, fatti a monte in ``__main__.py`` — qui sono
+già valori pronti all'uso, mai testo grezzo da riparsare) e
+``auto_hint_threshold`` (modalità silenziosa a soglia, opt-in). Default
+(``None``, parametro omesso): comportamento storico INVARIATO al carattere —
+pannello completo dopo OGNI mossa, chiunque l'abbia giocata
 (``_run_advice_step`` con soglia ``None`` chiama semplicemente
-``_show_advice``, identico a prima). Se l'utente passa una soglia (CLI flag
-``--auto-hint-threshold``, vedi ``__main__.py``): il consiglio "in avanti"
-per la mossa che il player sta per scegliere resta SEMPRE a pannello pieno
-(è il cuore della companion mode, la soglia non si applica lì); solo dopo
-che il player registra la PROPRIA mossa si confronta l'eval con quello
-cachato appena prima che la giocasse — oltre soglia, pannello pieno con un
-framing esplicito ("hai perso ~Ncp, era meglio X"); entro soglia, un
-riconoscimento minimo (``ui.render_quiet_ack``), per ridurre il rumore
-invece di aggiungerne. ``/hint`` resta disponibile on-demand in ENTRAMBE le
-modalità, invariato."""
+``_show_advice``, identico a prima). Se l'utente passa una soglia: il
+consiglio "in avanti" per la mossa che il player sta per scegliere resta
+SEMPRE a pannello pieno (è il cuore della companion mode, la soglia non si
+applica lì); solo dopo che il player registra la PROPRIA mossa si confronta
+l'eval con quello cachato appena prima che la giocasse — oltre soglia,
+pannello pieno con un framing esplicito ("hai perso ~Ncp, era meglio X");
+entro soglia, un riconoscimento minimo (``ui.render_quiet_ack``), per
+ridurre il rumore invece di aggiungerne. ``/hint`` resta disponibile
+on-demand in ENTRAMBE le modalità, invariato."""
 
 from __future__ import annotations
 
@@ -39,10 +42,10 @@ from rich.console import Console
 
 from . import ui
 from .autohint import exceeds_threshold
-from .backend_client import BackendClient
+from .backend_client import BackendClient, BackendError, BackendUnavailable
 from .config import BASE_URL
 from .effort import prompt_effort_choice, skill_level_for_effort
-from .local_engine import open_local_engine
+from .local_engine import LocalEngineAdvisor, open_local_engine
 from .session import CompanionSession, is_players_turn
 
 
@@ -223,37 +226,111 @@ def _announce_game_over(session: CompanionSession, input_func=input, output_func
         _run_analyze(session, output_func)
 
 
+def _resume_session(
+    game_id: str,
+    base_url: str = BASE_URL,
+    output_func=print,
+    backend: BackendClient | None = None,
+    engine_advisor: LocalEngineAdvisor | None = None,
+) -> CompanionSession | None:
+    """Riprende una sessione companion interrotta (Wave 2). Ritorna la
+    ``CompanionSession`` pronta all'uso, oppure ``None`` se il resume non è
+    possibile — in quel caso ha già stampato un messaggio d'errore chiaro e
+    ripulito ogni risorsa aperta (nessun crash, nessuna risorsa leaked).
+
+    ``backend``/``engine_advisor`` sono iniettabili (default ``None`` →
+    costruiti qui) per gli stessi motivi per cui lo sono altrove nel
+    pacchetto (``BackendClient(client=...)``, ``LocalEngineAdvisor(engine=...)``):
+    permettono di testare questa funzione con un backend in-process
+    (ASGITransport) e un motore stub, senza spawnare un vero Stockfish o
+    aprire un vero socket.
+
+    Effort per il motore locale: NON ri-chiesto all'utente. ``engine_elo``
+    del record ripreso È l'effort scelto l'ultima volta (persistito 1:1 in
+    ``games.engine_elo`` da ``POST /game/companion/new``, vedi
+    ``backend/main.py``) — non solo un "default ragionevole": ririchiederlo
+    sarebbe pura frizione senza alcun guadagno, quindi si riusa direttamente.
+
+    Nota implementativa: viene fatta UNA chiamata GET di "peek" (per
+    conoscere ``engine_elo`` PRIMA di aprire il motore locale con lo Skill
+    Level giusto) più quella interna a ``CompanionSession.resume()`` — due
+    GET invece di uno. Entrambe read-only, senza alcuna ricerca Stockfish
+    lato server (costo trascurabile), a fronte di un ``CompanionSession.resume()``
+    che resta autosufficiente e testabile in isolamento (design doc §11.6)."""
+    if backend is None:
+        backend = BackendClient(base_url=base_url)
+    try:
+        peek_state = backend.get_game(game_id)
+    except (BackendError, BackendUnavailable) as exc:
+        output_func(f"Impossibile riprendere la partita '{game_id}': {exc}")
+        backend.close()
+        return None
+
+    if engine_advisor is None:
+        engine_advisor = open_local_engine(skill_level_for_effort(peek_state["engine_elo"]))
+    session = CompanionSession(backend, engine_advisor)
+    try:
+        session.resume(game_id)
+    except (BackendError, BackendUnavailable) as exc:
+        output_func(f"Impossibile riprendere la partita '{game_id}': {exc}")
+        session.close()
+        return None
+
+    output_func(
+        f"Sessione companion ripresa (game_id={session.game_id}, "
+        f"{session.move_count()} mosse già registrate)."
+    )
+    return session
+
+
 def run(
     base_url: str = BASE_URL,
     input_func=input,
     output_func=print,
+    resume_game_id: str | None = None,
+    start_fen: str | None = None,
     auto_hint_threshold: int | None = None,
 ) -> None:
-    """``auto_hint_threshold`` (Wave 2, design doc §10): ``None`` (default,
+    """``resume_game_id``/``start_fen`` (Wave 2, design doc §11.6): modi
+    alternativi di avviare/riprendere una sessione, mutuamente esclusivi tra
+    loro (validato a monte in ``__main__.py``, mai qui).
+
+    ``auto_hint_threshold`` (Wave 2, design doc §10): ``None`` (default,
     parametro omesso) = comportamento storico Wave 1 invariato, pannello
     completo dopo ogni mossa. Un intero attiva la modalità silenziosa —
     pannello completo automatico solo quando la mossa DEL PLAYER perde più
     di ``auto_hint_threshold`` cp rispetto al meglio disponibile, altrimenti
     un riconoscimento minimo. Vedi ``_run_advice_step``/``_seed_pending_advice``
-    per la logica di branching, isolata da questo loop."""
+    per la logica di branching, isolata da questo loop. Componibile con
+    ``resume_game_id``/``start_fen``: si applica a prescindere da come la
+    sessione è stata avviata."""
     console = Console()
 
     output_func("Chess Lab — Companion mode (CLI)")
     output_func("Segui una partita giocata altrove: riporta le mosse, ricevi consigli.")
 
-    player_color = _prompt_player_color(input_func, output_func)
-    effort_elo = prompt_effort_choice(input_func, output_func)
-
-    backend = BackendClient(base_url=base_url)
-    engine_advisor = open_local_engine(skill_level_for_effort(effort_elo))
-    session = CompanionSession(backend, engine_advisor)
-
-    session.start(player_color, effort_elo)
-    if session.degraded:
-        output_func("Impossibile contattare il backend: modalità solo-consigli.")
-        output_func("PGN/storico/analisi non saranno disponibili in questa sessione.")
+    if resume_game_id is not None:
+        # Wave 2: resume salta i prompt colore/effort (già noti dalla partita
+        # ripresa, vedi _resume_session) — nessun start_fen qui, sarebbe
+        # incoerente con "riprendi la partita X" (start_fen è solo per una
+        # sessione NUOVA, mutuamente esclusivo con --resume in __main__.py).
+        session = _resume_session(resume_game_id, base_url, output_func)
+        if session is None:
+            return
     else:
-        output_func(f"Sessione companion creata (game_id={session.game_id}).")
+        player_color = _prompt_player_color(input_func, output_func)
+        effort_elo = prompt_effort_choice(input_func, output_func)
+
+        backend = BackendClient(base_url=base_url)
+        engine_advisor = open_local_engine(skill_level_for_effort(effort_elo))
+        session = CompanionSession(backend, engine_advisor)
+
+        session.start(player_color, effort_elo, start_fen=start_fen)
+        if session.degraded:
+            output_func("Impossibile contattare il backend: modalità solo-consigli.")
+            output_func("PGN/storico/analisi non saranno disponibili in questa sessione.")
+        else:
+            output_func(f"Sessione companion creata (game_id={session.game_id}).")
 
     if auto_hint_threshold is not None:
         output_func(

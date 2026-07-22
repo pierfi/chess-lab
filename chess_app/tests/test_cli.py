@@ -10,6 +10,7 @@ Stockfish, per velocità/determinismo) — solo depth/Skill Level passati
 all'engine vengono verificati, non la qualità della ricerca."""
 
 import io
+import sys
 
 import chess
 import chess.engine
@@ -20,14 +21,17 @@ from rich.console import Console
 import cli.autohint as autohint
 import cli.ui as ui
 from backend.main import app
-from cli import __main__ as cli_main
+from cli.__main__ import _build_arg_parser
+from cli.__main__ import main as cli_main
 from cli.backend_client import BackendClient, BackendError, BackendUnavailable
 from cli.config import ADVICE_DEPTH, ADVICE_MULTIPV, FULL_STRENGTH_ELO, elo_to_skill_depth
 from cli.effort import EFFORT_LEVELS, skill_level_for_effort
 from cli.local_engine import LocalEngineAdvisor
+from cli.pgn_bootstrap import fen_from_partial_pgn
 from cli.repl import (
     _announce_game_over,
     _format_analysis_summary,
+    _resume_session,
     _run_advice_step,
     _seed_pending_advice,
     _show_advice,
@@ -797,6 +801,312 @@ class TestShowAdvice:
 
 
 # ---------------------------------------------------------------------------
+# 8. Wave 2 — resume di una sessione interrotta (design doc §11.6)
+# ---------------------------------------------------------------------------
+
+class TestBackendClientGetGame:
+    def test_get_game_returns_the_same_state_shape_as_board_to_state(self):
+        backend = make_backend_client()
+        created = backend.new_companion_game("white", 1200)
+
+        fetched = backend.get_game(created["game_id"])
+
+        assert fetched["game_id"] == created["game_id"]
+        assert fetched["fen"] == created["fen"]
+        assert fetched["player_color"] == "white"
+        assert fetched["engine_elo"] == 1200
+
+    def test_get_game_404_raises_backend_error(self):
+        backend = make_backend_client()
+        with pytest.raises(BackendError):
+            backend.get_game("doesnotexist")
+
+
+class TestCompanionSessionResume:
+    """`CompanionSession.resume()` — parallelo di `start()` ma da
+    `GET /game/{id}` invece di `POST /game/companion/new`."""
+
+    def test_resume_rehydrates_board_and_metadata_from_an_existing_game(self):
+        backend1 = make_backend_client()
+        session1 = CompanionSession(backend1, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session1.start("black", 1800)
+        session1.register_move("e4")  # avversario (bianco)
+        session1.register_move("e5")  # player (nero)
+        game_id = session1.game_id
+        fen_before_close = session1.board.fen()
+        session1.close()
+
+        backend2 = make_backend_client()
+        session2 = CompanionSession(backend2, LocalEngineAdvisor(FakeAnalysingEngine()))
+        state = session2.resume(game_id)
+
+        assert not session2.degraded
+        assert session2.game_id == game_id
+        assert session2.player_color == "black"
+        assert session2.board.fen() == fen_before_close
+        assert state["fen"] == fen_before_close
+        assert session2.move_count() == 2
+        assert session2.move_history_san() == ["e4", "e5"]
+        session2.close()
+
+    def test_resume_unknown_game_id_raises_backend_error_not_crash(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+
+        with pytest.raises(BackendError):
+            session.resume("doesnotexist")
+
+        # Nessun degrado silenzioso: a differenza di start(), resume() non ha
+        # un fallback sensato (design doc §11.6) — lo stato di sessione non è
+        # stato toccato dal fallimento.
+        assert session.game_id is None
+        assert not session.degraded
+
+    def test_resume_with_backend_unreachable_raises_backend_unavailable_not_crash(self):
+        backend = make_unreachable_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+
+        with pytest.raises(BackendUnavailable):
+            session.resume("whatever")
+
+        assert session.game_id is None
+        assert not session.degraded  # MAI degradato: nessun FEN noto da cui ripartire
+
+
+class TestResumeSessionHelper:
+    """`_resume_session` (repl.py) — glue fra CLI e CompanionSession.resume():
+    peek dell'effort persistito, messaggi d'errore chiari, nessun crash."""
+
+    def test_resume_session_success_prints_confirmation_and_move_count(self):
+        backend1 = make_backend_client()
+        session1 = CompanionSession(backend1, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session1.start("white", 1200)
+        session1.register_move("e4")
+        game_id = session1.game_id
+        session1.close()
+
+        outputs: list[str] = []
+        session2 = _resume_session(
+            game_id,
+            output_func=outputs.append,
+            backend=make_backend_client(),
+            engine_advisor=LocalEngineAdvisor(FakeAnalysingEngine()),
+        )
+
+        assert session2 is not None
+        assert session2.game_id == game_id
+        assert session2.move_count() == 1
+        assert any(game_id in line and "1 mosse" in line for line in outputs)
+        session2.close()
+
+    def test_resume_session_configures_local_engine_skill_from_persisted_effort(self, monkeypatch):
+        backend1 = make_backend_client()
+        session1 = CompanionSession(backend1, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session1.start("white", 600)  # effort "Principiante" -> persistito come engine_elo=600
+        game_id = session1.game_id
+        session1.close()
+
+        captured_engine = FakeAnalysingEngine()
+
+        def fake_open_local_engine(skill_level, stockfish_path=None):
+            return LocalEngineAdvisor(captured_engine, skill_level=skill_level)
+
+        monkeypatch.setattr("cli.repl.open_local_engine", fake_open_local_engine)
+
+        session2 = _resume_session(game_id, output_func=lambda _line: None, backend=make_backend_client())
+
+        assert captured_engine.configure_calls == [{"Skill Level": skill_level_for_effort(600)}]
+        session2.close()
+
+    def test_resume_session_404_prints_clear_error_and_returns_none(self):
+        outputs: list[str] = []
+        result = _resume_session("doesnotexist", output_func=outputs.append, backend=make_backend_client())
+
+        assert result is None
+        assert any("doesnotexist" in line for line in outputs)
+
+    def test_resume_session_backend_down_prints_clear_error_and_returns_none(self):
+        outputs: list[str] = []
+        result = _resume_session(
+            "whatever", output_func=outputs.append, backend=make_unreachable_backend_client()
+        )
+
+        assert result is None
+        assert any("whatever" in line for line in outputs)
+
+
+# ---------------------------------------------------------------------------
+# 9. Wave 2 — bootstrap da PGN parziale (design doc §10/§11.6)
+# ---------------------------------------------------------------------------
+
+class TestPgnBootstrap:
+    def test_valid_partial_pgn_returns_the_resulting_fen(self):
+        fen = fen_from_partial_pgn("1. e4 e5 2. Nf3 Nc6")
+
+        board = chess.Board()
+        for san in ("e4", "e5", "Nf3", "Nc6"):
+            board.push_san(san)
+        assert fen == board.fen()
+
+    def test_pgn_with_custom_fen_header_is_honored(self):
+        custom_fen = "4k3/8/8/8/8/8/8/R3K3 w - - 0 1"
+        pgn_text = f'[FEN "{custom_fen}"]\n[SetUp "1"]\n\n1. Ra8+ Kd7\n'
+
+        fen = fen_from_partial_pgn(pgn_text)
+
+        board = chess.Board(custom_fen)
+        board.push_san("Ra8+")
+        board.push_san("Kd7")
+        assert fen == board.fen()
+
+    def test_empty_pgn_raises_value_error(self):
+        with pytest.raises(ValueError):
+            fen_from_partial_pgn("")
+
+    def test_garbage_text_with_no_moves_raises_value_error(self):
+        # chess.pgn.read_game() è tollerante: garbage produce comunque un
+        # Game valido (errors vuoto) ma a zero mosse — è quello il segnale di
+        # invalidità, stessa convenzione di POST /games/import.
+        with pytest.raises(ValueError):
+            fen_from_partial_pgn("questo non è affatto un pgn")
+
+
+# ---------------------------------------------------------------------------
+# 10. Wave 2 — parsing argv (__main__.py): mutua esclusione + wiring verso run()
+# ---------------------------------------------------------------------------
+
+class TestArgParsing:
+    def test_no_flags_defaults_to_all_none(self):
+        parser = _build_arg_parser()
+        args = parser.parse_args([])
+        assert args.resume is None
+        assert args.fen is None
+        assert args.pgn is None
+        assert args.pgn_file is None
+
+    def test_resume_flag_parses(self):
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--resume", "a1b2c3d4"])
+        assert args.resume == "a1b2c3d4"
+
+    def test_resume_and_fen_are_mutually_exclusive(self):
+        parser = _build_arg_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--resume", "a1b2c3d4", "--fen", "8/8/8/8/8/8/8/8 w - - 0 1"])
+
+    def test_pgn_and_pgn_file_are_mutually_exclusive(self):
+        parser = _build_arg_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--pgn", "1. e4 e5", "--pgn-file", "game.pgn"])
+
+    def test_resume_and_pgn_are_mutually_exclusive(self):
+        parser = _build_arg_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--resume", "a1b2c3d4", "--pgn", "1. e4 e5"])
+
+
+class TestMainWiring:
+    """`main()` (__main__.py) — traduce argv in kwargs per `repl.run()`.
+    `run` è monkeypatchata in ogni test: verifichiamo solo il wiring, mai il
+    loop REPL interattivo (nessun test Wave 1 lo fa nemmeno per il flusso
+    standard, richiederebbe un backend live)."""
+
+    def test_resume_flag_is_passed_through_untouched(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: captured.update(kw))
+        monkeypatch.setattr(sys, "argv", ["prog", "--resume", "deadbeef"])
+
+        cli_main()
+
+        assert captured == {
+            "resume_game_id": "deadbeef",
+            "start_fen": None,
+            "auto_hint_threshold": None,
+        }
+
+    def test_fen_flag_is_passed_through_as_start_fen(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: captured.update(kw))
+        fen = "8/8/8/8/8/8/8/K6k w - - 0 1"
+        monkeypatch.setattr(sys, "argv", ["prog", "--fen", fen])
+
+        cli_main()
+
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": fen,
+            "auto_hint_threshold": None,
+        }
+
+    def test_no_flags_passes_none_for_both(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: captured.update(kw))
+        monkeypatch.setattr(sys, "argv", ["prog"])
+
+        cli_main()
+
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": None,
+            "auto_hint_threshold": None,
+        }
+
+    def test_inline_pgn_is_converted_to_the_resulting_start_fen(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: captured.update(kw))
+        monkeypatch.setattr(sys, "argv", ["prog", "--pgn", "1. e4 e5 2. Nf3"])
+
+        cli_main()
+
+        board = chess.Board()
+        for san in ("e4", "e5", "Nf3"):
+            board.push_san(san)
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": board.fen(),
+            "auto_hint_threshold": None,
+        }
+
+    def test_pgn_file_is_read_and_converted_to_start_fen(self, monkeypatch, tmp_path):
+        pgn_file = tmp_path / "partial.pgn"
+        pgn_file.write_text("1. e4 e5\n")
+        captured = {}
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: captured.update(kw))
+        monkeypatch.setattr(sys, "argv", ["prog", "--pgn-file", str(pgn_file)])
+
+        cli_main()
+
+        board = chess.Board()
+        board.push_san("e4")
+        board.push_san("e5")
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": board.fen(),
+            "auto_hint_threshold": None,
+        }
+
+    def test_invalid_inline_pgn_exits_cleanly_without_calling_run(self, monkeypatch):
+        run_calls = []
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: run_calls.append(kw))
+        monkeypatch.setattr(sys, "argv", ["prog", "--pgn", "questo non è un pgn valido"])
+
+        with pytest.raises(SystemExit):
+            cli_main()
+
+        assert run_calls == []  # mai raggiunto: la validazione fallisce prima
+
+    def test_missing_pgn_file_exits_cleanly_without_calling_run(self, monkeypatch):
+        run_calls = []
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: run_calls.append(kw))
+        monkeypatch.setattr(sys, "argv", ["prog", "--pgn-file", "/nonexistent/path/game.pgn"])
+
+        with pytest.raises(SystemExit):
+            cli_main()
+
+        assert run_calls == []
+
+
+# ---------------------------------------------------------------------------
 # 11. Wave 2 — auto-hint a soglia, opt-in (design doc §10)
 # ---------------------------------------------------------------------------
 
@@ -1113,17 +1423,37 @@ class TestQuietModeIntegration:
 
 
 class TestAutoHintCliFlag:
-    """`cli/__main__.py:_parse_args` — il flag `--auto-hint-threshold`.
-    Argparse minimale scoped a questo solo flag (vedi docstring di modulo:
-    se un'altra branch Wave 2 ne ha già aggiunto uno per un flag diverso,
-    un merge riconcilierà i due — non un problema di questo task)."""
+    """`cli/__main__.py:_build_arg_parser` — il flag `--auto-hint-threshold`,
+    riconciliato nello stesso parser mutuamente esclusivo di `--resume`/
+    `--fen`/`--pgn`/`--pgn-file` (i due parser separati scritti in parallelo
+    dalle due branch Wave 2 sono stati unificati in un solo `ArgumentParser`
+    in fase di merge)."""
 
-    def test_flag_omitted_defaults_to_none(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["chess-lab-companion"])
-        args = cli_main._parse_args()
+    def test_flag_omitted_defaults_to_none(self):
+        parser = _build_arg_parser()
+        args = parser.parse_args([])
         assert args.auto_hint_threshold is None
 
-    def test_flag_parses_integer_value(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["chess-lab-companion", "--auto-hint-threshold", "150"])
-        args = cli_main._parse_args()
+    def test_flag_parses_integer_value(self):
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--auto-hint-threshold", "150"])
         assert args.auto_hint_threshold == 150
+
+    def test_flag_composes_with_resume(self):
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--resume", "a1b2c3d4", "--auto-hint-threshold", "150"])
+        assert args.resume == "a1b2c3d4"
+        assert args.auto_hint_threshold == 150
+
+    def test_main_wiring_passes_auto_hint_threshold_through(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: captured.update(kw))
+        monkeypatch.setattr(sys, "argv", ["prog", "--auto-hint-threshold", "150"])
+
+        cli_main()
+
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": None,
+            "auto_hint_threshold": 150,
+        }
