@@ -324,7 +324,7 @@ Analisi completa di design in [`docs/coach-mode.md`](docs/coach-mode.md).
 ---
 
 <a id="fase-8"></a>
-### 🔲 Fase 8 — Modalità CLI / Companion
+### ✅ Fase 8 (Wave 1) — Modalità CLI / Companion — completata 22 luglio 2026
 **Target: settembre/ottobre 2026 · ~3 settimane · ~16.5 ore**
 
 Obiettivo: un compagno da terminale (REPL stile `claude`) che segue una partita giocata **altrove**
@@ -338,19 +338,18 @@ Analisi completa di design in [`docs/cli-companion-mode-design.md`](docs/cli-com
 
 **Wave 1 — MVP companion (~11 ore):**
 
-**Nota di stato (22 luglio 2026): 3 dei 4 task Wave 1 sono implementati e già mergiati in `main`** —
+**Nota di stato (22 luglio 2026): Wave 1 chiusa, tutti e 4 i task implementati e mergiati in `main`** —
 `feature/cli-companion-backend` (PR #37), `feature/cli-companion-cli` (PR #32, mergiata 21 luglio
-2026) e `feature/cli-companion-cli-commands` (PR #33, mergiata 21 luglio 2026). Il quarto task (UI
-`rich`) è in lavorazione in parallelo proprio ora su `feature/cli-companion-cli-ui`, non ancora
-mergiato — resta l'unico 🔲 della tabella, e per questo Fase 8 nel suo complesso resta 🔲 finché non
-chiude anche quello.
+2026), `feature/cli-companion-cli-commands` (PR #33, mergiata 21 luglio 2026) e
+`feature/cli-companion-cli-ui` (PR #38, mergiata 22 luglio 2026 — UI `rich`, 236/236 test verdi).
+Wave 2 (tabella sotto) resta 🔲, non impegnata.
 
 | Settimana | Attività | Ore stimate | Modello suggerito | Stato |
 |-----------|----------|-------------|-------------------|-------|
 | — | Backend observer-mode: `source="companion"` (nessuna migration), endpoint `POST /game/companion/new` + `POST /game/{id}/companion/move` (SAN, riconosce anche UCI non ambiguo) + `POST /game/{id}/companion/undo`, loop di append estratto e condiviso con `/games/import` | ~3 ore | Opus | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-backend`, PR #37) |
 | — | CLI: scheletro REPL in `chess_app/cli/`, selezione effort→Skill (riusa `games.engine_elo`), Stockfish locale long-lived per i consigli, client di mirroring verso il backend, loop di consiglio con UX della mossa divergente | ~4 ore | Opus | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-cli`, PR #32, 21 luglio 2026) |
 | — | CLI: comandi `/pgn` e `/analyze` (mirror di endpoint esistenti) + riepilogo errori a fine partita | ~2 ore | Sonnet | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-cli-commands`, PR #33, 21 luglio 2026; 219/219 test verdi alla verifica del 22 luglio 2026) |
-| — | UI `rich`: spinner ricerca, pannelli eval/mossa migliore in place, evidenza "in presa"; nuova dipendenza in `requirements.txt` | ~2 ore | Sonnet | 🔲 in lavorazione in parallelo su branch `feature/cli-companion-cli-ui` — non ancora mergiato, stato di completamento non noto a questo momento |
+| — | UI `rich`: spinner ricerca, pannelli eval/mossa migliore in place, evidenza "in presa"; nuova dipendenza in `requirements.txt` | ~2 ore | Sonnet | ✅ fatto e mergiato in `main` (branch `feature/cli-companion-cli-ui`, PR #38, 22 luglio 2026; `rich==15.0.0`; 236/236 test verdi, verificati direttamente) |
 
 **Wave 2 — promosse dal backlog di design (~5.5 ore):**
 
