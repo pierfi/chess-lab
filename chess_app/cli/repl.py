@@ -1,5 +1,6 @@
 """REPL companion mode — scheletro Wave 1 (design doc §8) + Task 3 + Task 4
-(UI ``rich``, design doc §7).
+(UI ``rich``, design doc §7) + Wave 2 "auto-hint con soglia" (opt-in, design
+doc §10).
 
 Selezione effort, apertura sessione companion (o degrado "solo consigli" se
 il backend non risponde), loop mossa-per-mossa con consiglio dopo ogni mossa
@@ -15,18 +16,34 @@ appoggia alle sue funzioni. Le due funzioni già coperte da test con il
 pattern ``output_func``/``input_func`` (``_format_analysis_summary``,
 ``_announce_game_over``) restano puro testo, INVARIATE — nessun rischio per
 quei test, coerente con la scelta di non introdurre `rich` dove non serve
-(il riepilogo di fine partita è testo semplice, non un pannello dal vivo)."""
+(il riepilogo di fine partita è testo semplice, non un pannello dal vivo).
+
+**Wave 2 — modalità silenziosa a soglia (``auto_hint_threshold``, opt-in).**
+Default (``None``, parametro omesso): comportamento storico INVARIATO al
+carattere — pannello completo dopo OGNI mossa, chiunque l'abbia giocata
+(``_run_advice_step`` con soglia ``None`` chiama semplicemente
+``_show_advice``, identico a prima). Se l'utente passa una soglia (CLI flag
+``--auto-hint-threshold``, vedi ``__main__.py``): il consiglio "in avanti"
+per la mossa che il player sta per scegliere resta SEMPRE a pannello pieno
+(è il cuore della companion mode, la soglia non si applica lì); solo dopo
+che il player registra la PROPRIA mossa si confronta l'eval con quello
+cachato appena prima che la giocasse — oltre soglia, pannello pieno con un
+framing esplicito ("hai perso ~Ncp, era meglio X"); entro soglia, un
+riconoscimento minimo (``ui.render_quiet_ack``), per ridurre il rumore
+invece di aggiungerne. ``/hint`` resta disponibile on-demand in ENTRAMBE le
+modalità, invariato."""
 
 from __future__ import annotations
 
 from rich.console import Console
 
 from . import ui
+from .autohint import exceeds_threshold
 from .backend_client import BackendClient
 from .config import BASE_URL
 from .effort import prompt_effort_choice, skill_level_for_effort
 from .local_engine import open_local_engine
-from .session import CompanionSession
+from .session import CompanionSession, is_players_turn
 
 
 def _prompt_player_color(input_func=input, output_func=print) -> str:
@@ -39,18 +56,99 @@ def _prompt_player_color(input_func=input, output_func=print) -> str:
         output_func("Rispondi 'w' o 'b'.")
 
 
-def _show_advice(session: CompanionSession, console: Console) -> None:
+def _show_advice(session: CompanionSession, console: Console) -> dict:
     """Spinner mentre il motore locale calcola + pannello eval/mossa
     migliore/candidate + pezzi in presa a colori + lista mosse stilizzata
     (Task 4, design doc §7). Unico punto della REPL che tocca il rendering
-    rich per il loop di consiglio — chiamato dopo ogni mossa registrata e da
-    ``/hint``."""
+    rich per il loop di consiglio — chiamato dopo ogni mossa registrata (in
+    modalità sempre-attiva) e da ``/hint`` (in ENTRAMBE le modalità).
+
+    Ritorna l'advice calcolata (Wave 2, design doc §10): additivo, i
+    chiamanti esistenti che ignorano il valore di ritorno restano invariati
+    — serve a ``_run_advice_step``/``_seed_pending_advice`` per cachare
+    l'eval "pre-mossa" del player senza una seconda chiamata all'engine."""
     with ui.advice_status(console):
         advice = session.advice()
         threats = session.threats()
     ui.render_advice(console, advice)
     ui.render_threats(console, threats)
     ui.render_move_list(console, session.move_history_san())
+    return advice
+
+
+def _seed_pending_advice(session: CompanionSession, console: Console, auto_hint_threshold: int | None) -> None:
+    """Wave 2 (design doc §10) — SOLO in modalità silenziosa: se la
+    primissima mossa da riportare in sessione è già quella del player (es.
+    gioca il bianco sul sito esterno), mostra subito il consiglio "in
+    avanti" e ne cacha l'eval — stesso trattamento che il loop principale
+    riserva al consiglio mostrato dopo la mossa dell'avversario, solo
+    anticipato all'apertura sessione perché qui non c'è ancora stata alcuna
+    mossa dell'avversario da cui farlo scattare. Nessun effetto (nessuna
+    chiamata) in modalità sempre-attiva — ``auto_hint_threshold is None``
+    esce subito."""
+    if auto_hint_threshold is None:
+        return
+    if not is_players_turn(session.board, session.player_color):
+        return
+    advice = _show_advice(session, console)
+    session.remember_pending_player_advice(advice)
+
+
+def _run_advice_step(
+    session: CompanionSession,
+    console: Console,
+    auto_hint_threshold: int | None,
+    was_players_move: bool,
+) -> None:
+    """Passo di consiglio dopo una mossa registrata con successo — branch
+    fra modalità sempre-attiva (default, Wave 1, invariata) e modalità
+    silenziosa a soglia (Wave 2, opt-in, design doc §10).
+
+    ``was_players_move`` va calcolato dal CHIAMANTE PRIMA di registrare la
+    mossa (``is_players_turn(session.board, session.player_color)`` sulla
+    board precedente) — dopo ``register_move`` il turno è già passato
+    all'altro lato, quindi va catturato prima o si perde l'informazione.
+
+    - ``auto_hint_threshold is None`` → comportamento storico invariato al
+      carattere: pannello completo dopo OGNI mossa, chiunque l'abbia
+      giocata (``_show_advice`` diretto, nessuna logica di soglia toccata).
+    - Altrimenti, dopo la mossa dell'AVVERSARIO (``was_players_move`` False
+      — tocca ora al player scegliere la propria) → pannello completo
+      comunque: è il consiglio "in avanti" che serve per decidere la
+      propria mossa, il cuore della companion mode — la soglia si applica
+      solo a valle, mai qui. L'eval di questo consiglio viene cachata in
+      sessione come "pre-mossa" per calcolare il delta quando arriverà la
+      mossa del player.
+    - Dopo la mossa del PLAYER (``was_players_move`` True) → calcola il
+      delta rispetto all'eval cachata (``session.consume_pending_player_loss``,
+      ``None`` se non ce n'era una, es. prima mossa di una sessione dove
+      gioca il bianco — mai un pannello forzato su un dato che non
+      abbiamo): entro soglia → riconoscimento minimo; oltre soglia →
+      framing esplicito + LO STESSO pannello completo della modalità
+      sempre-attiva (mai un'informazione nascosta quando l'errore è
+      grave)."""
+    if auto_hint_threshold is None:
+        _show_advice(session, console)
+        return
+
+    if not was_players_move:
+        advice = _show_advice(session, console)
+        session.remember_pending_player_advice(advice)
+        return
+
+    with ui.advice_status(console):
+        advice = session.advice()
+        threats = session.threats()
+    delta = session.consume_pending_player_loss(advice["eval_cp"])
+    loss_cp = delta["loss_cp"]
+
+    if exceeds_threshold(loss_cp, auto_hint_threshold):
+        ui.render_threshold_alert(console, loss_cp, delta["best_move_san"])
+        ui.render_advice(console, advice)
+        ui.render_threats(console, threats)
+        ui.render_move_list(console, session.move_history_san())
+    else:
+        ui.render_quiet_ack(console, loss_cp)
 
 
 def _format_pgn_outcome(outcome: dict) -> str:
@@ -125,7 +223,19 @@ def _announce_game_over(session: CompanionSession, input_func=input, output_func
         _run_analyze(session, output_func)
 
 
-def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
+def run(
+    base_url: str = BASE_URL,
+    input_func=input,
+    output_func=print,
+    auto_hint_threshold: int | None = None,
+) -> None:
+    """``auto_hint_threshold`` (Wave 2, design doc §10): ``None`` (default,
+    parametro omesso) = comportamento storico Wave 1 invariato, pannello
+    completo dopo ogni mossa. Un intero attiva la modalità silenziosa —
+    pannello completo automatico solo quando la mossa DEL PLAYER perde più
+    di ``auto_hint_threshold`` cp rispetto al meglio disponibile, altrimenti
+    un riconoscimento minimo. Vedi ``_run_advice_step``/``_seed_pending_advice``
+    per la logica di branching, isolata da questo loop."""
     console = Console()
 
     output_func("Chess Lab — Companion mode (CLI)")
@@ -144,6 +254,14 @@ def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
         output_func("PGN/storico/analisi non saranno disponibili in questa sessione.")
     else:
         output_func(f"Sessione companion creata (game_id={session.game_id}).")
+
+    if auto_hint_threshold is not None:
+        output_func(
+            f"Modalità silenziosa attiva: pannello completo automatico solo se perdi più di "
+            f"{auto_hint_threshold} cp rispetto al meglio disponibile; altrimenti un riconoscimento "
+            f"minimo. /hint resta disponibile in ogni momento."
+        )
+        _seed_pending_advice(session, console, auto_hint_threshold)
 
     try:
         while True:
@@ -174,12 +292,16 @@ def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
                 output_func("  Comando sconosciuto.")
                 continue
 
+            # Va catturato PRIMA di register_move: dopo, il turno è già
+            # passato all'altro lato (Wave 2, design doc §10).
+            was_players_move = is_players_turn(session.board, session.player_color)
+
             outcome = session.register_move(line)
             if not outcome["ok"]:
                 output_func(f"  {outcome['error']}")
                 continue
 
-            _show_advice(session, console)
+            _run_advice_step(session, console, auto_hint_threshold, was_players_move)
 
             if session.is_game_over():
                 _announce_game_over(session, input_func, output_func)
@@ -188,5 +310,5 @@ def run(base_url: str = BASE_URL, input_func=input, output_func=print) -> None:
         output_func("Sessione chiusa.")
 
 
-def main() -> None:
-    run()
+def main(auto_hint_threshold: int | None = None) -> None:
+    run(auto_hint_threshold=auto_hint_threshold)

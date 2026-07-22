@@ -121,6 +121,41 @@ def render_threats(console: Console, labeled: dict | None) -> None:
     )
 
 
+def render_quiet_ack(console: Console, loss_cp: int | None) -> None:
+    """Riconoscimento MINIMO in modalità silenziosa (Wave 2, auto-hint a
+    soglia, design doc §10) per una mossa del player rimasta ENTRO soglia —
+    una singola riga attenuata, niente pannelli: l'intero senso della
+    modalità è ridurre il rumore, non spostarlo in un pannello più piccolo.
+
+    ``loss_cp`` può essere negativo (la mossa ha superato l'eval "migliore"
+    cachata — tipico rumore di ricerca a depth fissa fra due chiamate
+    separate all'engine, non un errore da segnalare) o ``None`` (nessuna
+    advice "pre-mossa" era stata cachata, es. la primissima mossa di una
+    sessione dove il player apre col bianco — "non quantificabile", mai
+    trattato come zero)."""
+    if loss_cp is None:
+        console.print("[dim]  Mossa registrata (delta eval non disponibile).[/dim]")
+        return
+    console.print(f"[dim]  Mossa entro soglia (Δ{loss_cp:+d} cp rispetto al meglio).[/dim]")
+
+
+def render_threshold_alert(console: Console, loss_cp: int, best_move_san: str | None) -> None:
+    """Framing esplicito mostrato SOPRA il pannello di consiglio completo
+    quando la mossa del player SUPERA la soglia configurata (Wave 2, design
+    doc §10) — l'unico caso in cui la modalità silenziosa si comporta come
+    quella sempre-attiva (Wave 1), con in più il "quanto" e, se noto, il
+    "cosa sarebbe stato meglio" — la mossa già suggerita dal motore locale
+    PRIMA che il player giocasse, nessuna nuova ricerca dedicata a questo
+    scopo."""
+    if best_move_san:
+        console.print(
+            f"[bold yellow]  Hai perso ~{loss_cp} cp rispetto al meglio "
+            f"— il motore consigliava {best_move_san}.[/bold yellow]"
+        )
+    else:
+        console.print(f"[bold yellow]  Hai perso ~{loss_cp} cp rispetto al meglio.[/bold yellow]")
+
+
 def render_move_list(console: Console, move_history_san: list[str]) -> None:
     """Lista mosse stilizzata (design doc §7) — coppie bianco/nero numerate,
     stessa convenzione di notazione di una scoresheet/PGN. Nulla se non è
