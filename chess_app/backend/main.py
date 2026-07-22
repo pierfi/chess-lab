@@ -4,6 +4,7 @@ import asyncio
 import io
 import math
 import random
+import re
 import threading
 import time
 import uuid
@@ -216,6 +217,28 @@ class EndgameStartRequest(BaseModel):
     player_color: str = Field(pattern=r"^(white|black)$")
     engine_elo: int = Field(ge=400, le=2800)
 
+class CompanionNewGameRequest(BaseModel):
+    """Crea una sessione companion (observer mode, vedi
+    docs/cli-companion-mode-design.md §2.2). player_color = il lato che gioca
+    l'utente sul sito esterno (determina l'orientamento dei consigli e a chi
+    /game/analyze attribuirà blunder/accuracy). effort_elo = la forza dei
+    CONSIGLI (hint), non un avversario — riusa la colonna esistente
+    games.engine_elo (§11.1: nessuna nuova colonna, companion è comunque
+    escluso di default da /stats). start_fen opzionale (partita ripresa a
+    metà su un sito esterno)."""
+    player_color: str = Field(pattern=r"^(white|black)$")
+    effort_elo: int = Field(ge=400, le=2800)
+    start_fen: str | None = Field(default=None)
+
+class CompanionMoveRequest(BaseModel):
+    """Una mossa riportata dall'esterno per il lato al tratto (chiunque sia).
+    ``move`` accetta SAN canonico o, come comodità di digitazione dal vivo,
+    UCI auto-rilevato (§11.4). ``side`` opzionale: se presente deve coincidere
+    con board.turn — guardia contro il riportare due mosse dello stesso
+    colore di fila."""
+    move: str
+    side: str | None = Field(default=None, pattern=r"^(white|black)$")
+
 def _new_game_id() -> str:
     return uuid.uuid4().hex[:8]
 
@@ -321,6 +344,61 @@ def _build_pgn(game: dict) -> str:
     for move in game["move_objects"]:
         node = node.add_variation(move)
     return str(pgn_game)
+
+def _append_reported_move(game: dict, move: chess.Move, think_ms: int | None = None) -> dict:
+    """Applica una mossa "riportata" (non giocata da un engine dentro questo
+    processo) a ``game``: aggiorna board + move_objects e ritorna il dict riga
+    ``moves`` pronto per la persistenza (ply/color/uci/san/fen_before/think_ms).
+
+    Estratto dal corpo del loop `for move in parsed.mainline_moves()` di
+    /games/import (Fase 3) — condiviso ORA anche da
+    POST /game/{id}/companion/move (docs/cli-companion-mode-design.md §2.2):
+    stessa identica forma dati, una mossa alla volta invece che in blocco.
+    Nessuna duplicazione fra i due chiamanti.
+
+    Solleva ValueError se la mossa non è legale sulla posizione corrente —
+    il chiamante decide come tradurlo (HTTPException con messaggio/status
+    specifico del proprio endpoint)."""
+    board = game["board"]
+    if move not in board.legal_moves:
+        raise ValueError("illegal move")
+    fen_before = board.fen()
+    san = board.san(move)
+    color = "white" if board.turn == chess.WHITE else "black"
+    board.push(move)
+    game["move_objects"].append(move)
+    return {
+        "ply": len(game["move_objects"]),
+        "color": color,
+        "uci": move.uci(),
+        "san": san,
+        "fen_before": fen_before,
+        "think_ms": think_ms,
+    }
+
+_UCI_MOVE_RE = re.compile(r"^[a-h][1-8][a-h][1-8][qrbnQRBN]?$")
+
+def _parse_companion_move(board: chess.Board, move_text: str) -> chess.Move | None:
+    """Interpreta una mossa riportata dall'esterno nella companion mode.
+    Canonicamente SAN (§11.4 del design doc — è quello che si legge/detta da
+    una partita altrove), ma auto-rileva l'input UCI (es. "e2e4") come
+    comodità di digitazione — python-chess fa già entrambi i parsing, qui
+    serve solo scegliere quale tentare. Ritorna None se non parsabile/
+    ambiguo/illegale sulla posizione corrente (mai un'eccezione: il chiamante
+    la traduce in un 400)."""
+    text = move_text.strip()
+    if not text:
+        return None
+    if _UCI_MOVE_RE.match(text):
+        try:
+            move = chess.Move.from_uci(text.lower())
+        except ValueError:
+            return None
+        return move if move in board.legal_moves else None
+    try:
+        return board.parse_san(text)
+    except ValueError:
+        return None
 
 def _current_opening(game: dict, move_history_uci: list[str]) -> dict | None:
     """Apertura ECO corrente via longest-prefix match (Fase 5). Il book è
@@ -803,10 +881,18 @@ def _persist_analysis(
 def health():
     return {"status": "ok"}
 
-def _create_new_game(req: NewGameRequest, source: str = "play") -> dict:
-    """Core di creazione partita, condiviso da /game/new e dal drill di finali
-    (POST /training/endgames/{id}/start, Fase 4) — stessa logica, diverso
-    ``source`` persistito e diversa provenienza di ``start_fen``."""
+def _create_new_game(
+    req: NewGameRequest, source: str = "play", suppress_engine: bool = False
+) -> dict:
+    """Core di creazione partita, condiviso da /game/new, dal drill di finali
+    (POST /training/endgames/{id}/start, Fase 4) e dalla companion mode
+    (POST /game/companion/new, vedi docs/cli-companion-mode-design.md) —
+    stessa logica, diverso ``source`` persistito e diversa provenienza di
+    ``start_fen``. ``suppress_engine=True`` (companion) impedisce SEMPRE
+    l'apertura automatica dell'engine, anche se player_color non coincide col
+    lato al tratto sulla board iniziale: una companion è una partita osservata,
+    entrambe le mosse arrivano da POST /game/{id}/companion/move, l'engine non
+    gioca mai nulla nel record tracciato."""
     game_id = _new_game_id()
 
     # Board iniziale: standard oppure da start_fen (validata qui per non far
@@ -856,7 +942,7 @@ def _create_new_game(req: NewGameRequest, source: str = "play") -> dict:
     # standard e mai esercitato finora da uno start_fen non standard.
     initial_turn = "white" if board.turn == chess.WHITE else "black"
     first_move = None
-    if req.player_color != initial_turn:
+    if not suppress_engine and req.player_color != initial_turn:
         engine_color = initial_turn
         fen_before = board.fen()
         engine_m, elapsed = _engine_move(board, req.engine_elo)
@@ -1025,6 +1111,103 @@ def make_move(req: MoveRequest):
 @app.get("/game/{game_id}")
 def get_game(game_id: str):
     game = _get_game(game_id)
+    return _board_to_state(game_id, game)
+
+# -------------------------------------------------------------------
+# Companion mode (observer-mode, CLI/companion feature) — segue una partita
+# giocata ALTROVE (lichess.org, chess.com, scacchiera fisica). Entrambe le
+# mosse (avversario e player) arrivano riportate dall'esterno via
+# /companion/move: l'engine NON gioca MAI nella partita tracciata, viene
+# interpellato solo per consiglio tramite gli endpoint già esistenti
+# (/hint, /threats — riusati as-is, nessuna modifica). Vedi
+# docs/cli-companion-mode-design.md §2.2 per il design completo.
+# -------------------------------------------------------------------
+
+@app.post("/game/companion/new")
+def companion_new_game(req: CompanionNewGameRequest):
+    """Crea una sessione companion: nessun engine gioca mai in questa
+    partita (suppress_engine=True su _create_new_game, anche se player_color
+    non coincide col lato al tratto sullo start_fen). effort_elo è persistito
+    nella colonna esistente games.engine_elo (§11.1: riuso deliberato, non un
+    avversario — companion resta comunque escluso di default da GET /games e
+    /stats/* per via del filtro source='play')."""
+    new_req = NewGameRequest(
+        player_color=req.player_color,
+        engine_elo=req.effort_elo,
+        start_fen=req.start_fen,
+    )
+    state = _create_new_game(new_req, source="companion", suppress_engine=True)
+    state["source"] = "companion"
+    return state
+
+@app.post("/game/{game_id}/companion/move")
+def companion_move(game_id: str, req: CompanionMoveRequest):
+    """Registra UNA mossa riportata dall'esterno per il lato al tratto,
+    chiunque esso sia — mai una risposta automatica dell'engine. Riusa
+    _append_reported_move, lo stesso helper del loop di /games/import: stessa
+    forma dati moves (fen_before/uci/san/color), think_ms=NULL perché non è
+    una mossa pensata in tempo reale davanti a questo processo. 400 se la
+    mossa è illegale/non parsabile o se ``side`` non coincide col lato al
+    tratto (guardia contro il riportare due mosse dello stesso colore)."""
+    game = _get_game(game_id)
+    board = game["board"]
+
+    if _game_over_info(game) is not None:
+        raise HTTPException(status_code=400, detail="Game is already over")
+
+    turn_color = "white" if board.turn == chess.WHITE else "black"
+    if req.side is not None and req.side != turn_color:
+        raise HTTPException(
+            status_code=400,
+            detail=f"It's {turn_color}'s turn to move, not {req.side}'s",
+        )
+
+    move = _parse_companion_move(board, req.move)
+    if move is None:
+        raise HTTPException(status_code=400, detail="Illegal or unparseable move")
+
+    row = _append_reported_move(game, move)
+    game["last_engine_move"] = None
+
+    # Riusa _persist_move_batch (già scritto per /game/move in Fase 3): stessa
+    # semantica di persistenza (riga moves + snapshot pgn/clock/esito), qui con
+    # un solo elemento pending invece di due (mossa player + risposta engine).
+    over = _check_game_over(board)
+    _persist_move_batch(game_id, game, [row], over)
+
+    return _board_to_state(game_id, game)
+
+@app.post("/game/{game_id}/companion/undo")
+def companion_undo(game_id: str):
+    """Takeback: annulla l'ultima mossa registrata (mis-typing dal vivo con
+    una partita seguita a mente/a voce è frequente). board.pop() + cancella
+    la riga moves con ply massimo per la partita. 404 se la partita non
+    esiste o se non ci sono mosse da annullare."""
+    game = _get_game(game_id)
+    if not game["move_objects"]:
+        raise HTTPException(status_code=404, detail="No moves to undo")
+
+    game["board"].pop()
+    game["move_objects"].pop()
+    game["last_engine_move"] = None
+    game["result_override"] = None
+
+    with session_scope() as db:
+        last_move = db.execute(
+            select(Move)
+            .where(Move.game_id == game_id)
+            .order_by(Move.ply.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if last_move is not None:
+            db.delete(last_move)
+        game_row = db.get(Game, game_id)
+        if game_row is not None:
+            game_row.pgn = _build_pgn(game)
+            game_row.result = None
+            game_row.result_reason = None
+            game_row.finished_at = None
+
     return _board_to_state(game_id, game)
 
 @app.websocket("/ws/game/{game_id}")
@@ -1425,26 +1608,29 @@ def import_game(req: ImportPgnRequest):
     if parsed.headers.get("FEN"):
         start_fen = board.fen()
 
-    move_objects: list[chess.Move] = []
+    player_color = "white"
+    engine_elo = 0  # sentinella "avversario sconosciuto" per un import, vedi docstring
+    game: dict = {
+        "board": board,
+        "player_color": player_color,
+        "engine_elo": engine_elo,
+        "move_objects": [],
+        "last_engine_move": None,
+        "created_at": None,  # valorizzato sotto, non serve per l'append
+        "start_fen": start_fen,
+    }
+
+    # Corpo del loop estratto in _append_reported_move (§2.2 del design doc
+    # companion mode) — condiviso ora anche da POST /game/{id}/companion/move,
+    # una mossa alla volta invece che in blocco. Stessa forma dati moves.
     move_rows: list[dict] = []
     ply = 0
     for move in parsed.mainline_moves():
         ply += 1
-        if move not in board.legal_moves:
+        try:
+            move_rows.append(_append_reported_move(game, move))
+        except ValueError:
             raise HTTPException(status_code=400, detail=f"Illegal move at ply {ply} in PGN")
-        fen_before = board.fen()
-        san = board.san(move)
-        color = "white" if board.turn == chess.WHITE else "black"
-        board.push(move)
-        move_objects.append(move)
-        move_rows.append({
-            "ply": ply,
-            "color": color,
-            "uci": move.uci(),
-            "san": san,
-            "fen_before": fen_before,
-            "think_ms": None,
-        })
 
     # chess.pgn.read_game() è tollerante: testo non-PGN produce comunque un
     # Game valido (senza errors) ma a zero mosse — è così che rileviamo un
@@ -1455,18 +1641,7 @@ def import_game(req: ImportPgnRequest):
 
     game_id = _new_game_id()
     created_at = utcnow()
-    player_color = "white"
-    engine_elo = 0  # sentinella "avversario sconosciuto" per un import, vedi docstring
-
-    game = {
-        "board": board,
-        "player_color": player_color,
-        "engine_elo": engine_elo,
-        "move_objects": move_objects,
-        "last_engine_move": None,
-        "created_at": created_at.strftime("%Y.%m.%d"),
-        "start_fen": start_fen,
-    }
+    game["created_at"] = created_at.strftime("%Y.%m.%d")
 
     over = _check_game_over(board)
     with session_scope() as db:

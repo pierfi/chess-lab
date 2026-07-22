@@ -2448,3 +2448,237 @@ class TestTheoryLessons:
         for lesson_id in ("italiana-idee", "forchetta-cavallo"):
             r = client.get(f"/training/lessons/{lesson_id}")
             assert r.json()["related_drill_id"] is None
+
+
+# -------------------------------------------------------------------
+# Companion mode (CLI/companion feature, backend observer-mode) —
+# docs/cli-companion-mode-design.md. Partita osservata: entrambe le mosse
+# arrivano riportate dall'esterno, l'engine non gioca mai nel record
+# tracciato. source="companion" (nessuna migration, colonna già libera).
+# -------------------------------------------------------------------
+class TestCompanionMode:
+    def _new(self, client, player_color="white", effort_elo=1300, start_fen=None):
+        body = {"player_color": player_color, "effort_elo": effort_elo}
+        if start_fen is not None:
+            body["start_fen"] = start_fen
+        r = client.post("/game/companion/new", json=body)
+        assert r.status_code == 200
+        return r.json()
+
+    def test_new_game_has_no_engine_move_player_white(self, client):
+        data = self._new(client, player_color="white", effort_elo=1300)
+        assert data["source"] == "companion"
+        assert data["engine_elo"] == 1300  # effort_elo riusa engine_elo (§11.1)
+        assert data["move_history"] == []
+        assert data["turn"] == "white"
+        assert data["player_color"] == "white"
+
+    def test_new_game_player_black_still_no_engine_opening_move(self, client):
+        # Regressione critica: _create_new_game normalmente farebbe aprire
+        # l'engine se player_color != lato al tratto iniziale. La companion
+        # mode deve sopprimerlo SEMPRE — è il punto centrale del design.
+        data = self._new(client, player_color="black", effort_elo=1300)
+        assert data["move_history"] == []
+        assert data["turn"] == "white"  # nessuno ha ancora mosso
+        assert data["last_engine_move"] is None
+
+    def test_new_game_persisted_with_companion_source(self, client):
+        data = self._new(client)
+        gid = data["game_id"]
+        with SessionLocal() as db:
+            row = db.get(Game, gid)
+            assert row is not None
+            assert row.source == "companion"
+            assert row.engine_elo == 1300
+
+    def test_report_moves_alternating_both_sides(self, client):
+        data = self._new(client, player_color="white")
+        gid = data["game_id"]
+
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "e4", "side": "white"})
+        assert r.status_code == 200
+        state = r.json()
+        assert state["move_history"] == ["e2e4"]
+        assert state["move_history_san"] == ["e4"]
+        assert state["turn"] == "black"
+        assert state["last_engine_move"] is None  # mai l'engine, anche qui
+
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "e5", "side": "black"})
+        assert r.status_code == 200
+        state = r.json()
+        assert state["move_history"] == ["e2e4", "e7e5"]
+        assert state["turn"] == "white"
+
+        with SessionLocal() as db:
+            moves = (
+                db.execute(select(Move).where(Move.game_id == gid).order_by(Move.ply))
+                .scalars()
+                .all()
+            )
+            assert len(moves) == 2
+            assert [m.uci for m in moves] == ["e2e4", "e7e5"]
+            assert [m.color for m in moves] == ["white", "black"]
+            assert all(m.think_ms is None for m in moves)
+            game_row = db.get(Game, gid)
+            assert "1. e4 e5" in game_row.pgn
+
+    def test_report_move_side_omitted_still_works(self, client):
+        data = self._new(client)
+        gid = data["game_id"]
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "e4"})
+        assert r.status_code == 200
+        assert r.json()["move_history"] == ["e2e4"]
+
+    def test_report_move_uci_autodetected(self, client):
+        data = self._new(client)
+        gid = data["game_id"]
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "e2e4"})
+        assert r.status_code == 200
+        state = r.json()
+        assert state["move_history"] == ["e2e4"]
+        assert state["move_history_san"] == ["e4"]
+
+    def test_report_move_uci_promotion_autodetected(self, client):
+        # Posizione con pedone bianco pronto a promuovere: UCI a lunghezza 5
+        # (con suffisso pezzo) deve essere riconosciuto come UCI, non SAN.
+        data = self._new(
+            client,
+            player_color="white",
+            start_fen="7k/P7/8/8/8/8/8/7K w - - 0 1",
+        )
+        gid = data["game_id"]
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "a7a8q"})
+        assert r.status_code == 200
+        state = r.json()
+        assert state["move_history"] == ["a7a8q"]
+
+    def test_side_guard_rejects_out_of_turn_report(self, client):
+        data = self._new(client, player_color="white")
+        gid = data["game_id"]
+        # Dopo la creazione tocca al bianco: riportare col side "black" è la
+        # guardia esplicita contro il registrare due mosse dello stesso colore.
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "e4", "side": "black"})
+        assert r.status_code == 400
+
+        # Nessuna mutazione di stato sulla richiesta rifiutata.
+        r2 = client.get(f"/game/{gid}")
+        assert r2.json()["move_history"] == []
+
+    def test_illegal_move_rejected(self, client):
+        data = self._new(client)
+        gid = data["game_id"]
+        # Ne4 non è una mossa legale dalla posizione di partenza.
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "Ne4"})
+        assert r.status_code == 400
+        assert client.get(f"/game/{gid}").json()["move_history"] == []
+
+    def test_unparseable_move_rejected(self, client):
+        data = self._new(client)
+        gid = data["game_id"]
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "not a move"})
+        assert r.status_code == 400
+        assert client.get(f"/game/{gid}").json()["move_history"] == []
+
+    def test_move_after_game_over_rejected(self, client):
+        # Matto del barbiere iniettato direttamente sul board in-memory (stesso
+        # pattern di TestHint.test_hint_game_over) per forzare un game-over
+        # deterministico senza dover giocare un'intera partita.
+        data = self._new(client)
+        gid = data["game_id"]
+        games[gid]["board"] = chess.Board(
+            "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3"
+        )
+        r = client.post(f"/game/{gid}/companion/move", json={"move": "g2g3"})
+        assert r.status_code == 400
+
+    def test_undo_pops_last_move_and_deletes_db_row(self, client):
+        data = self._new(client)
+        gid = data["game_id"]
+        client.post(f"/game/{gid}/companion/move", json={"move": "e4"})
+        client.post(f"/game/{gid}/companion/move", json={"move": "e5"})
+
+        r = client.post(f"/game/{gid}/companion/undo")
+        assert r.status_code == 200
+        state = r.json()
+        assert state["move_history"] == ["e2e4"]
+        assert state["turn"] == "black"
+
+        with SessionLocal() as db:
+            moves = (
+                db.execute(select(Move).where(Move.game_id == gid).order_by(Move.ply))
+                .scalars()
+                .all()
+            )
+            assert len(moves) == 1
+            assert moves[0].uci == "e2e4"
+
+    def test_undo_no_moves_404(self, client):
+        data = self._new(client)
+        gid = data["game_id"]
+        r = client.post(f"/game/{gid}/companion/undo")
+        assert r.status_code == 404
+
+    def test_undo_unknown_game_404(self, client):
+        r = client.post("/game/doesnotexist/companion/undo")
+        assert r.status_code == 404
+
+    def test_companion_excluded_from_games_list_by_default(self, client):
+        data = self._new(client)
+        gid = data["game_id"]
+        client.post(f"/game/{gid}/companion/move", json={"move": "e4"})
+
+        r = client.get("/games")
+        assert gid not in {item["game_id"] for item in r.json()["items"]}
+
+        r = client.get("/games?source=companion")
+        assert gid in {item["game_id"] for item in r.json()["items"]}
+
+    def test_companion_excluded_from_stats_summary_by_default(self, client):
+        # Il DB temporaneo è condiviso da tutta la sessione pytest (vedi
+        # conftest.py) e altri test in questa stessa classe creano già partite
+        # companion: si isola per differenza (before/after) invece di
+        # assumere un conteggio assoluto, stesso approccio di TestStatsSummary.
+        before = client.get("/stats/summary?source=companion").json()["total_games"]
+        data = self._new(client)
+        gid = data["game_id"]
+        client.post(f"/game/{gid}/companion/move", json={"move": "e4"})
+
+        after = client.get("/stats/summary?source=companion").json()["total_games"]
+        assert after == before + 1  # contabile solo se richiesto esplicitamente
+
+        # Nessun'altra classe di test scrive source='play' con questo esatto
+        # game_id: la prova primaria di esclusione dal default è già coperta
+        # da test_companion_excluded_from_games_list_by_default (stesso filtro
+        # _game_filter_conditions condiviso da GET /games e /stats/*).
+
+    def test_hint_threats_analyze_work_unmodified_on_companion_game(self, client):
+        """Punto 7 del task: /hint, /threats e /game/analyze devono funzionare
+        senza modifiche su una partita companion, perché costruita con la
+        stessa forma dati (move_objects/moves) di qualsiasi altra partita."""
+        data = self._new(client, player_color="white", effort_elo=1300)
+        gid = data["game_id"]
+
+        client.post(f"/game/{gid}/companion/move", json={"move": "e4"})
+        client.post(f"/game/{gid}/companion/move", json={"move": "e5"})
+        client.post(f"/game/{gid}/companion/move", json={"move": "Nf3"})
+
+        r = client.post(f"/game/{gid}/hint", json={"depth": 8})
+        assert r.status_code == 200
+        hint = r.json()
+        assert len(hint["lines"]) == 3
+        assert isinstance(hint["eval_cp"], int)
+
+        r = client.get(f"/game/{gid}/threats")
+        assert r.status_code == 200
+        assert "side" in r.json() and "in_presa" in r.json()
+
+        r = client.post("/game/analyze", json={"game_id": gid, "depth": 8})
+        assert r.status_code == 200
+        analysis = r.json()
+        assert analysis["total_moves"] == 3
+        assert analysis["moves"][0]["move_uci"] == "e2e4"
+
+        # pgn field presente e corretto in ogni risposta di stato companion.
+        r = client.get(f"/game/{gid}")
+        assert r.json()["pgn"].strip()
+        assert "1. e4 e5 2. Nf3" in r.json()["pgn"]
