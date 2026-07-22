@@ -332,22 +332,25 @@ non entra nel backend, vive solo nel processo CLI.
 
 ---
 
-## 8. Scope v1
+## 8. Scope Wave 1
 
-**Dentro v1:**
+**Dentro Wave 1:**
 - Backend: `source="companion"` (nessuna migration) + `POST /game/companion/new`,
-  `POST /game/{id}/companion/move` (append di una mossa umana, UCI **o** SAN, nessun engine),
-  `POST /game/{id}/companion/undo` (takeback — il mis-typing dal vivo è frequente). Loop di append
-  estratto in un helper condiviso con `/games/import` (de-duplica, non duplica).
-- Consigli riusati as-is: `GET /game/{id}/hint`, `GET /game/{id}/threats`.
+  `POST /game/{id}/companion/move` (append di una mossa umana in **SAN** — formato canonico, vedi
+  §11.4 — nessun engine), `POST /game/{id}/companion/undo` (takeback — il mis-typing dal vivo è
+  frequente). Loop di append estratto in un helper condiviso con `/games/import` (de-duplica, non
+  duplica).
+- Consigli riusati as-is: `GET /game/{id}/hint` (depth fissa, disaccoppiata dall'effort — vedi
+  §11.2), `GET /game/{id}/threats`.
 - PGN e analisi riusati as-is: campo `pgn` + `POST /game/analyze`.
-- CLI (nuovo processo, hybrid §4): REPL stile `claude`; selezione effort → Skill; Stockfish locale
-  long-lived per i consigli; mirroring della partita al backend; comandi `/pgn`, `/analyze`, `/undo`,
-  `/hint` (richiama un consiglio on-demand), `/quit`. UI con `rich`.
+- CLI (nuovo processo, `chess_app/cli/` — vedi §11.6, hybrid §4): REPL stile `claude`; selezione
+  effort → Skill (riusando `games.engine_elo` per l'effort, vedi §11.1); Stockfish locale long-lived
+  per i consigli; mirroring della partita al backend; comandi `/pgn`, `/analyze`, `/undo`, `/hint`
+  (richiama un consiglio on-demand), `/quit`. UI con `rich`.
 - Consiglio testuale = `/threats` etichettato "tuoi / suoi" (§3.1) + best move SAN + eval + delta
   rispetto alla mossa giocata.
 
-**Rimandato (post-v1):** vedi §10.
+**Rimandato (Wave 2):** vedi §9 (tabella Wave 2) e §10 (backlog residuo, non impegnato).
 
 **Fuori scope (di ogni versione):** far giocare Stockfish nella partita companion (per definizione è
 osservata, non giocata); scraping automatico delle mosse dal sito esterno (le mosse le riporta
@@ -362,32 +365,48 @@ solo-locale).
 CLI), più vicina a una **voce di fase** che a un "miglioramento" di
 [`docs/improvements.md`](improvements.md) (quel registro è per refinement di feature *esistenti*).
 Naturale come nuova voce di roadmap a sé, affiancabile alla Fase 6 (UX avanzata) o alla Fase 7 in
-base alla priorità. La feature richiede genuinamente **più di un task**, da cui la tabella:
+base alla priorità. La feature richiede genuinamente **più di un task**, da cui la tabella — divisa in
+due wave: Wave 1 è l'MVP end-to-end (§8), Wave 2 sono le tre idee del backlog (§10) promosse a scope
+impegnato una volta chiuso Wave 1.
+
+### Wave 1 — MVP companion
 
 | Settimana | Attività | Ore stimate | Modello suggerito | Stato |
 |-----------|----------|-------------|-------------------|-------|
 | — | Backend observer-mode: `source="companion"`, endpoint `companion/new` + `companion/move` + `companion/undo`, estrazione del loop di append condiviso con `/games/import` (de-dup) | ~3 ore | Opus | 🔲 |
-| — | CLI: scheletro REPL, selezione effort→Skill, Stockfish locale long-lived, client di mirroring verso il backend, loop di consiglio (best move + eval + `/threats`) con la UX della mossa divergente (registro ciò che è stato giocato, non ciò che era suggerito) | ~4 ore | Opus | 🔲 |
+| — | CLI: scheletro REPL in `chess_app/cli/`, selezione effort→Skill, Stockfish locale long-lived, client di mirroring verso il backend, loop di consiglio (best move + eval + `/threats`) con la UX della mossa divergente (registro ciò che è stato giocato, non ciò che era suggerito) | ~4 ore | Opus | 🔲 |
 | — | CLI: comandi `/pgn` e `/analyze` (mirror di endpoint esistenti) + riepilogo errori a fine partita | ~2 ore | Sonnet | 🔲 |
 | — | UI `rich`: spinner ricerca, pannelli eval/mossa migliore aggiornati in place, lista mosse stilizzata, evidenza "in presa"; aggiunta di `rich` a `requirements.txt` | ~2 ore | Sonnet | 🔲 |
 
-**Totale: ~11 ore.** Split di modello secondo la convenzione del progetto (Opus sui pezzi di
+**Totale Wave 1: ~11 ore.** Split di modello secondo la convenzione del progetto (Opus sui pezzi di
 ragionamento — semantica observer-mode e UX del loop a mossa divergente; Sonnet sui task
 templated/meccanici — comandi che rispecchiano endpoint esistenti e rifinitura UI una volta fissato il
 pattern di interazione).
+
+### Wave 2 — promosse dal backlog (§10)
+
+Tre idee, tutte a basso costo perché appoggiate su meccanismi già presenti a fine Wave 1 (record
+persistito per-ply, `start_fen`, loop di consiglio con eval già calcolato).
+
+| Settimana | Attività | Ore stimate | Modello suggerito | Stato |
+|-----------|----------|-------------|-------------------|-------|
+| — | Salva/riprendi una sessione companion interrotta: comando `--resume <game_id>` (o elenco companion aperte), riusa `GET /game/{id}` + cache-miss (`_load_game_from_db`) — quasi gratis, il record esiste già per-ply | ~1.5 ore | Sonnet | 🔲 |
+| — | Metodi di input alternativi: incollare una FEN (riusa `start_fen`) o un PGN parziale (bootstrap da import, poi continua dal vivo) come punto di partenza di una sessione companion | ~2 ore | Sonnet | 🔲 |
+| — | Auto-hint con soglia (opt-in): mostrare il consiglio automaticamente solo quando l'eval della propria ultima mossa peggiora oltre una soglia configurabile (es. −150cp) — delta eval già disponibile dal loop di consiglio di Wave 1, nessuna dipendenza nuova | ~2 ore | Sonnet | 🔲 |
+
+**Totale Wave 2: ~5.5 ore.** Tutte templated/meccaniche una volta fissato il pattern di interazione
+in Wave 1 — nessuna richiede le decisioni di semantica (observer-mode, UX mossa divergente) che
+giustificavano Opus in Wave 1, quindi tutte assegnate a Sonnet.
 
 ---
 
 ## 10. Idee emerse (backlog, **non** scope impegnato)
 
 Idee genuinamente affiorate ragionando sulla feature. **Nessuna è promessa** — parcheggio, da
-valutare solo se/quando la companion mode avrà priorità.
+valutare solo se/quando la companion mode avrà priorità. Tre idee originariamente qui (salva/riprendi
+sessione, metodi di input alternativi, auto-hint a soglia) sono state **promosse a Wave 2** (§9) e
+rimosse da questa lista — restano solo le idee ancora non impegnate.
 
-- **Salva/riprendi una sessione companion interrotta.** L'utente chiude la CLI a metà di una partita
-  esterna lunga. Poiché il record è già persistito server-side (ogni `companion/move` scrive una riga
-  `moves`), riprenderlo è quasi gratis: un `GET /game/{id}` ricostruisce la board via cache-miss
-  (`_load_game_from_db`) e la CLI riparte dal `game_id`. Serve solo un comando `chess-lab --resume
-  <game_id>` (o un elenco delle companion aperte). Piccolo, ad alto valore.
 - **Segnalare i blunder/pezzi appesi dell'avversario, non solo i miei.** Come mostrato al §3.1, ricade
   **già** dalla semantica di `/threats` invocato ad ogni ply — quasi gratis. Vale la pena renderlo
   esplicito nella UX ("l'avversario ha lasciato la donna in presa") perché su un sito esterno cogliere
@@ -396,15 +415,11 @@ valutare solo se/quando la companion mode avrà priorità.
   torneo online). Il backend già distingue per `game_id`; la complessità è tutta nella CLI (quale
   sessione è "in focus"). Probabilmente over-engineering per un uso solo-locale, ma tecnicamente a
   basso costo lato server.
-- **Metodi di input alternativi.** Oltre al riporto incrementale mossa-per-mossa: incollare una **FEN**
-  direttamente (salto a una posizione arbitraria — riusa `start_fen`, utile per riprendere una partita
-  già avanzata) o incollare un **PGN parziale** (bootstrap della sessione da un import, poi continuare
-  dal vivo). L'input vocale (speech-to-move) è citato come possibilità ma è chiaramente fuori dal
-  perimetro tecnico attuale.
-- **Auto-hint con soglia (opt-in).** Invece di chiedere il consiglio ogni volta, mostrarlo
-  automaticamente solo quando l'eval della mia ultima mossa peggiora oltre una soglia (es. −150cp) —
-  cioè "ti avviso solo quando stai per sbagliare". È il gemello CLI dell'idea di coach proattivo di
-  Fase 7, ma **non-AI** (puro delta eval), quindi realizzabile senza dipendenze esterne.
+- **Nome dell'avversario nel PGN** (da §11.3, rimandato). Non solo un'etichetta generica
+  configurabile ("Opponent" invece di "Stockfish") come ipotizzato in §5 — l'utente vuole poter
+  registrare il **nome vero** dell'avversario esterno. Implica un piccolo campo opzionale in più
+  (es. `opponent_name` su `POST /game/companion/new`, propagato all'header `Black`/`White` di
+  `_build_pgn`). Rimandato: per Wave 1 resta l'etichetta generica attuale, il PGN è comunque valido.
 - **Timer/orologio informativo.** Se sto giocando a tempo sul sito esterno, un contatore nella CLI
   (puramente informativo, riporto io il tempo o lo stimo) — ma è duplicazione del time-control già in
   Fase 6 e probabilmente meglio lasciarlo al sito esterno. Citato per completezza, tendenzialmente da
@@ -412,26 +427,29 @@ valutare solo se/quando la companion mode avrà priorità.
 
 ---
 
-## 11. Domande aperte
+## 11. Domande aperte — risolte 21 luglio 2026
 
-1. **`effort_elo` in `games.engine_elo`?** Companion non ha un vero avversario-engine. Riusare la
-   colonna `engine_elo` (NOT NULL) per l'effort del *consiglio* è pragmatico (nessuna migration) e
-   companion è comunque escluso dal `/stats` di default (source-filter), quindi non alimenta l'ELO
-   simulato con un rating d'avversario finto — a differenza dell'import che usa la sentinella `0`.
-   Confermare la convenzione (effort vs sentinella).
-2. **Latenza dell'engine locale a effort alto.** A Skill 20 / depth alta il consiglio può costare più
-   di quanto sia gradevole in un loop dal vivo. Disaccoppiare depth ed effort (§6) mitiga; da tarare
-   un default di depth che sia "abbastanza forte, abbastanza rapido".
-3. **Etichetta avversario nel PGN.** `_build_pgn` scrive `Black/White = "Stockfish"` per il lato non
-   giocato dal player. Per una companion l'avversario è umano: rendere l'etichetta configurabile
-   (`"Opponent"`) o accettare l'inesattezza cosmetica? Rimandabile — il PGN resta valido comunque.
-4. **UCI vs SAN nell'input.** Accettare entrambi è comodo (`python-chess` fa `parse_san` e
-   `Move.from_uci`), ma il SAN è ambiguo se battuto male dal vivo (es. `Nd2` con due cavalli). La
-   guardia `side` + un feedback chiaro di "mossa illegale/ambigua, ribattila" copre il caso; da
-   decidere se preferire UCI come formato canonico e SAN come comodità.
-5. **Mirroring sincrono o best-effort?** Se il backend rallenta, il consiglio (engine locale) non deve
-   aspettarlo. Proposta: mirroring asincrono/fire-and-forget con una coda locale che si risincronizza,
-   così il loop di consiglio non è mai bloccato dal record durevole. Da confermare in implementazione.
-6. **Dove vive il file CLI?** Un nuovo `chess_app/cli/` o un singolo modulo `chess_app/companion.py`?
-   E come si lancia — `python -m chess_app.companion`, uno script console entry-point, o un flag su un
-   launcher condiviso col backend? Decisione di packaging, minore, da fissare all'avvio del lavoro.
+1. ✅ **`effort_elo` in `games.engine_elo`? → sì.** Riusare la colonna `engine_elo` (NOT NULL) per
+   l'effort del *consiglio* è pragmatico (nessuna migration) e companion è comunque escluso dal
+   `/stats` di default (source-filter), quindi non alimenta l'ELO simulato con un rating d'avversario
+   finto — a differenza dell'import che usa la sentinella `0`. Convenzione confermata.
+2. ✅ **Latenza dell'engine locale a effort alto → disaccoppiare depth ed effort.** Confermata la
+   direzione già proposta in §6: depth fissa e ragionevole (indicativamente 14-16) per la reattività
+   del consiglio dal vivo, Skill Level separato per la forza legata all'effort scelto. Il valore
+   esatto di depth resta un dettaglio da tarare in implementazione (non blocca l'avvio di Wave 1).
+3. 🔲 **Etichetta avversario nel PGN → rimandato, ma serve il nome vero, non solo un'etichetta
+   generica.** Spostato in backlog (§10): non un semplice swap `"Stockfish"` → `"Opponent"`, ma un
+   campo `opponent_name` opzionale da propagare a `_build_pgn`. Per Wave 1 resta l'etichetta generica
+   attuale — il PGN è comunque valido.
+4. ✅ **UCI vs SAN nell'input → SAN è il formato canonico.** L'input SAN resta comunque ambiguo se
+   battuto male (es. `Nd2` con due cavalli): la guardia `side` + un feedback chiaro di "mossa
+   illegale/ambigua, ribattila" copre il caso. Nota d'implementazione: un input in forma UCI
+   (es. `e2e4`) non ambigua può comunque essere riconosciuto automaticamente per comodità di
+   digitazione, ma SAN è il formato primario/canonico su cui si valida e si mostra la partita.
+5. 🔲 **Mirroring sincrono o best-effort? → non fondamentale ora, da affrontare in implementazione.**
+   Resta come placeholder la proposta del documento (mirroring asincrono/fire-and-forget con una coda
+   locale che si risincronizza, così il loop di consiglio non è mai bloccato dal record durevole), ma
+   la decisione finale è rimandata a quando si scrive il codice — non blocca la chiusura del design.
+6. ✅ **Dove vive il file CLI? → nuovo `chess_app/cli/`.** Pacchetto dedicato, non un singolo modulo
+   `chess_app/companion.py`. Modalità di lancio esatta (`python -m chess_app.cli`, entry-point
+   console, o altro) resta un dettaglio di packaging da fissare all'avvio del lavoro, non bloccante.
