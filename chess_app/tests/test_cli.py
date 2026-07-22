@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from rich.console import Console
 
+import cli.autohint as autohint
 import cli.ui as ui
 from backend.main import app
 from cli.__main__ import _build_arg_parser
@@ -27,8 +28,15 @@ from cli.config import ADVICE_DEPTH, ADVICE_MULTIPV, FULL_STRENGTH_ELO, elo_to_s
 from cli.effort import EFFORT_LEVELS, skill_level_for_effort
 from cli.local_engine import LocalEngineAdvisor
 from cli.pgn_bootstrap import fen_from_partial_pgn
-from cli.repl import _announce_game_over, _format_analysis_summary, _resume_session, _show_advice
-from cli.session import CompanionSession, label_threats, turn_prompt_label
+from cli.repl import (
+    _announce_game_over,
+    _format_analysis_summary,
+    _resume_session,
+    _run_advice_step,
+    _seed_pending_advice,
+    _show_advice,
+)
+from cli.session import CompanionSession, is_players_turn, label_threats, turn_prompt_label
 
 
 def make_capture_console(width: int = 100) -> tuple[Console, io.StringIO]:
@@ -67,6 +75,37 @@ class FakeAnalysingEngine:
 
     def quit(self) -> None:
         self.quit_called = True
+
+
+class ScriptedAnalysingEngine:
+    """Come `FakeAnalysingEngine`, ma con un eval (POV bianco) DIVERSO ad
+    ogni chiamata invece che costante — necessario per esercitare la logica
+    di soglia auto-hint (Wave 2, design doc §10), che confronta l'eval
+    "prima" e "dopo" di due chiamate separate `advice()`. Ogni chiamata ad
+    `analyse()` consuma il prossimo valore scriptato, in ordine; una lista
+    più corta delle chiamate effettive fa fallire il test con
+    `StopIteration` invece di restituire un valore silenziosamente sbagliato
+    — preferibile per un test di sequenza."""
+
+    def __init__(self, scores_white_pov: list[int]):
+        self._scores = iter(scores_white_pov)
+        self.analyse_calls = 0
+
+    def configure(self, options: dict) -> None:
+        pass
+
+    def analyse(self, board: chess.Board, limit: "chess.engine.Limit", multipv: int = 1):
+        self.analyse_calls += 1
+        score = next(self._scores)
+        move = next(iter(board.legal_moves))
+        info = {
+            "pv": [move],
+            "score": chess.engine.PovScore(chess.engine.Cp(score), chess.WHITE),
+        }
+        return [info for _ in range(multipv)]
+
+    def quit(self) -> None:
+        pass
 
 
 def make_backend_client() -> BackendClient:
@@ -979,7 +1018,11 @@ class TestMainWiring:
 
         cli_main()
 
-        assert captured == {"resume_game_id": "deadbeef", "start_fen": None}
+        assert captured == {
+            "resume_game_id": "deadbeef",
+            "start_fen": None,
+            "auto_hint_threshold": None,
+        }
 
     def test_fen_flag_is_passed_through_as_start_fen(self, monkeypatch):
         captured = {}
@@ -989,7 +1032,11 @@ class TestMainWiring:
 
         cli_main()
 
-        assert captured == {"resume_game_id": None, "start_fen": fen}
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": fen,
+            "auto_hint_threshold": None,
+        }
 
     def test_no_flags_passes_none_for_both(self, monkeypatch):
         captured = {}
@@ -998,7 +1045,11 @@ class TestMainWiring:
 
         cli_main()
 
-        assert captured == {"resume_game_id": None, "start_fen": None}
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": None,
+            "auto_hint_threshold": None,
+        }
 
     def test_inline_pgn_is_converted_to_the_resulting_start_fen(self, monkeypatch):
         captured = {}
@@ -1010,7 +1061,11 @@ class TestMainWiring:
         board = chess.Board()
         for san in ("e4", "e5", "Nf3"):
             board.push_san(san)
-        assert captured == {"resume_game_id": None, "start_fen": board.fen()}
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": board.fen(),
+            "auto_hint_threshold": None,
+        }
 
     def test_pgn_file_is_read_and_converted_to_start_fen(self, monkeypatch, tmp_path):
         pgn_file = tmp_path / "partial.pgn"
@@ -1024,7 +1079,11 @@ class TestMainWiring:
         board = chess.Board()
         board.push_san("e4")
         board.push_san("e5")
-        assert captured == {"resume_game_id": None, "start_fen": board.fen()}
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": board.fen(),
+            "auto_hint_threshold": None,
+        }
 
     def test_invalid_inline_pgn_exits_cleanly_without_calling_run(self, monkeypatch):
         run_calls = []
@@ -1045,3 +1104,356 @@ class TestMainWiring:
             cli_main()
 
         assert run_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 11. Wave 2 — auto-hint a soglia, opt-in (design doc §10)
+# ---------------------------------------------------------------------------
+
+class TestAutoHintPureLogic:
+    """`cli/autohint.py` — funzioni pure, nessun motore/terminale coinvolto.
+    Riusano ESATTAMENTE la convenzione di segno di `analyze_game` in
+    `backend/main.py` (CLAUDE.md, tabella di classificazione): eval sempre
+    POV bianco, loss = prima - dopo per il bianco, dopo - prima per il
+    nero."""
+
+    def test_move_loss_cp_positive_when_white_mover_eval_drops(self):
+        assert autohint.move_loss_cp(50, -100, "white") == 150
+
+    def test_move_loss_cp_positive_when_black_mover_eval_rises_for_white(self):
+        # Il nero muove: un peggioramento per lui è un eval (POV bianco) che
+        # SALE dopo la sua mossa, non che scende.
+        assert autohint.move_loss_cp(-50, 100, "black") == 150
+
+    def test_move_loss_cp_negative_means_the_move_improved_the_position(self):
+        assert autohint.move_loss_cp(50, 80, "white") == -30
+
+    def test_move_loss_cp_none_when_either_eval_is_missing(self):
+        assert autohint.move_loss_cp(None, 10, "white") is None
+        assert autohint.move_loss_cp(10, None, "black") is None
+        assert autohint.move_loss_cp(None, None, "white") is None
+
+    def test_exceeds_threshold_true_when_loss_bigger_than_threshold(self):
+        assert autohint.exceeds_threshold(200, 150) is True
+
+    def test_exceeds_threshold_false_when_loss_within_threshold(self):
+        assert autohint.exceeds_threshold(100, 150) is False
+
+    def test_exceeds_threshold_false_at_exact_boundary(self):
+        # Confronto stretto: perdere ESATTAMENTE la soglia non la supera.
+        assert autohint.exceeds_threshold(150, 150) is False
+
+    def test_exceeds_threshold_false_when_loss_is_none(self):
+        # "Non quantificabile" non forza mai il pannello completo.
+        assert autohint.exceeds_threshold(None, 150) is False
+
+    def test_exceeds_threshold_false_for_a_move_that_improved_the_position(self):
+        assert autohint.exceeds_threshold(-30, 150) is False
+
+
+class TestIsPlayersTurn:
+    """`cli.session.is_players_turn` — estratta da `turn_prompt_label` per
+    essere consumata anche dalla logica a soglia (serve PRIMA di
+    `register_move`, quando il turno è ancora quello di chi deve riportare
+    la prossima mossa)."""
+
+    def test_true_when_next_mover_is_the_player(self):
+        board = chess.Board()  # bianco al tratto
+        assert is_players_turn(board, "white") is True
+        assert is_players_turn(board, "black") is False
+
+    def test_alternates_after_a_move_is_pushed(self):
+        board = chess.Board()
+        board.push_san("e4")
+        assert is_players_turn(board, "white") is False
+        assert is_players_turn(board, "black") is True
+
+    def test_turn_prompt_label_still_consistent_with_is_players_turn(self):
+        # Refactor di turn_prompt_label su is_players_turn: nessuna
+        # regressione di comportamento (già coperto da TestTurnPrompt sopra,
+        # ripetuto qui per documentare esplicitamente la dipendenza).
+        board = chess.Board()
+        assert turn_prompt_label(board, "white") == "hai giocato"
+        assert is_players_turn(board, "white") is True
+
+
+class TestPendingPlayerAdvice:
+    """`CompanionSession.remember_pending_player_advice` /
+    `consume_pending_player_loss` — la cache "pre-mossa" del player (Wave 2,
+    design doc §10), verificata a livello di sessione senza passare dalla
+    REPL."""
+
+    def test_no_pending_advice_yields_non_quantifiable_delta(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+
+        delta = session.consume_pending_player_loss(34)
+
+        assert delta == {"loss_cp": None, "best_move_san": None}
+        session.close()
+
+    def test_remember_then_consume_computes_loss_for_white_player(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        session.remember_pending_player_advice(
+            {"eval_cp": 50, "lines": [{"move_uci": "g1f3", "move_san": "Nf3", "score_cp": 50}]}
+        )
+
+        delta = session.consume_pending_player_loss(-100)
+
+        assert delta == {"loss_cp": 150, "best_move_san": "Nf3"}
+        session.close()
+
+    def test_consuming_is_a_one_shot_operation(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        session.remember_pending_player_advice({"eval_cp": 50, "lines": []})
+
+        session.consume_pending_player_loss(-100)
+        second = session.consume_pending_player_loss(-100)
+
+        assert second == {"loss_cp": None, "best_move_san": None}
+        session.close()
+
+    def test_remember_then_consume_computes_loss_for_black_player(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("black", 1200)
+        session.remember_pending_player_advice({"eval_cp": -50, "lines": []})
+
+        delta = session.consume_pending_player_loss(100)
+
+        assert delta == {"loss_cp": 150, "best_move_san": None}
+        session.close()
+
+    def test_pending_advice_without_candidate_lines_has_no_best_move(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        session.remember_pending_player_advice({"eval_cp": 50, "lines": []})
+
+        delta = session.consume_pending_player_loss(20)
+
+        assert delta["best_move_san"] is None
+        session.close()
+
+    def test_undo_clears_pending_advice(self):
+        backend = make_backend_client()
+        session = CompanionSession(backend, LocalEngineAdvisor(FakeAnalysingEngine()))
+        session.start("white", 1200)
+        session.register_move("e4")
+        session.remember_pending_player_advice({"eval_cp": 10, "lines": []})
+
+        session.undo()
+
+        assert session.pending_player_advice is None
+        assert session.consume_pending_player_loss(10) == {"loss_cp": None, "best_move_san": None}
+        session.close()
+
+
+class TestQuietModeRendering:
+    """`ui.render_quiet_ack`/`ui.render_threshold_alert` (Wave 2) — stessa
+    tecnica "capture console" delle altre TestUiRendering sopra."""
+
+    def test_render_quiet_ack_shows_positive_delta(self):
+        console, buf = make_capture_console()
+        ui.render_quiet_ack(console, 42)
+        text = buf.getvalue()
+        assert "entro soglia" in text
+        assert "+42 cp" in text
+
+    def test_render_quiet_ack_shows_negative_delta_with_sign(self):
+        console, buf = make_capture_console()
+        ui.render_quiet_ack(console, -15)
+        assert "-15 cp" in buf.getvalue()
+
+    def test_render_quiet_ack_handles_none_loss(self):
+        console, buf = make_capture_console()
+        ui.render_quiet_ack(console, None)
+        assert "non disponibile" in buf.getvalue()
+
+    def test_render_threshold_alert_includes_best_move(self):
+        console, buf = make_capture_console()
+        ui.render_threshold_alert(console, 180, "Nf6")
+        text = buf.getvalue()
+        assert "Hai perso ~180 cp" in text
+        assert "Nf6" in text
+
+    def test_render_threshold_alert_without_best_move_omits_suggestion_text(self):
+        console, buf = make_capture_console()
+        ui.render_threshold_alert(console, 180, None)
+        text = buf.getvalue()
+        assert "Hai perso ~180 cp" in text
+        assert "consigliava" not in text
+
+
+class TestQuietModeIntegration:
+    """`_run_advice_step`/`_seed_pending_advice` (repl.py, Wave 2) — sessione
+    reale (backend via ASGITransport) + motore locale scriptato (eval
+    controllato ad ogni chiamata), stessa tecnica di TestShowAdvice sopra."""
+
+    def test_default_mode_always_shows_full_panel_regardless_of_loss(self):
+        # auto_hint_threshold=None: comportamento storico Wave 1 invariato,
+        # anche per una mossa che avrebbe sforato qualunque soglia.
+        backend = make_backend_client()
+        engine = ScriptedAnalysingEngine([50])
+        session = CompanionSession(backend, LocalEngineAdvisor(engine))
+        session.start("white", 1200)
+
+        console, buf = make_capture_console()
+        _run_advice_step(session, console, None, was_players_move=True)
+        text = buf.getvalue()
+
+        assert "Consiglio motore locale" in text
+        assert "Hai perso" not in text  # nessun framing soglia in modalità default
+        session.close()
+
+    def test_quiet_mode_shows_full_panel_after_opponent_move_and_caches_eval(self):
+        backend = make_backend_client()
+        engine = ScriptedAnalysingEngine([50])
+        session = CompanionSession(backend, LocalEngineAdvisor(engine))
+        session.start("black", 1200)
+
+        console, buf = make_capture_console()
+        _run_advice_step(session, console, 150, was_players_move=False)
+        text = buf.getvalue()
+
+        assert "Consiglio motore locale" in text  # sempre pieno dopo la mossa avversario
+        assert session.pending_player_advice is not None
+        assert session.pending_player_advice["eval_cp"] == 50
+        session.close()
+
+    def test_quiet_mode_suppresses_full_panel_under_threshold(self):
+        backend = make_backend_client()
+        engine = ScriptedAnalysingEngine([40])  # eval "dopo": perdita di 10cp per il bianco
+        session = CompanionSession(backend, LocalEngineAdvisor(engine))
+        session.start("white", 1200)
+        session.remember_pending_player_advice(
+            {"eval_cp": 50, "lines": [{"move_uci": "g1f3", "move_san": "Nf3", "score_cp": 50}]}
+        )
+
+        console, buf = make_capture_console()
+        _run_advice_step(session, console, 150, was_players_move=True)
+        text = buf.getvalue()
+
+        assert "Consiglio motore locale" not in text  # niente pannello pieno
+        assert "entro soglia" in text
+        session.close()
+
+    def test_quiet_mode_shows_full_panel_and_alert_over_threshold(self):
+        backend = make_backend_client()
+        engine = ScriptedAnalysingEngine([-300])  # eval "dopo": crollo di 350cp per il bianco
+        session = CompanionSession(backend, LocalEngineAdvisor(engine))
+        session.start("white", 1200)
+        session.remember_pending_player_advice(
+            {"eval_cp": 50, "lines": [{"move_uci": "g1f3", "move_san": "Nf3", "score_cp": 50}]}
+        )
+
+        console, buf = make_capture_console()
+        _run_advice_step(session, console, 150, was_players_move=True)
+        text = buf.getvalue()
+
+        assert "Hai perso ~350 cp" in text
+        assert "Nf3" in text
+        assert "Consiglio motore locale" in text  # pannello pieno mostrato comunque
+        session.close()
+
+    def test_quiet_mode_over_threshold_with_no_cached_advice_has_no_best_move_text(self):
+        # Nessuna advice pre-mossa cachata (es. mossa arrivata senza un
+        # /hint o un turno avversario precedente in questa sessione di
+        # test) → delta non quantificabile, mai un pannello forzato.
+        backend = make_backend_client()
+        engine = ScriptedAnalysingEngine([-300])
+        session = CompanionSession(backend, LocalEngineAdvisor(engine))
+        session.start("white", 1200)
+
+        console, buf = make_capture_console()
+        _run_advice_step(session, console, 150, was_players_move=True)
+        text = buf.getvalue()
+
+        assert "Consiglio motore locale" not in text
+        assert "non disponibile" in text
+        session.close()
+
+    def test_seed_pending_advice_shows_panel_when_player_moves_first(self):
+        # Player bianco: la primissima mossa da riportare è già la sua —
+        # nessuna mossa avversario precedente da cui far scattare il
+        # consiglio "in avanti", va quindi anticipato all'apertura sessione.
+        backend = make_backend_client()
+        engine = ScriptedAnalysingEngine([20])
+        session = CompanionSession(backend, LocalEngineAdvisor(engine))
+        session.start("white", 1200)
+
+        console, buf = make_capture_console()
+        _seed_pending_advice(session, console, 150)
+
+        assert "Consiglio motore locale" in buf.getvalue()
+        assert session.pending_player_advice["eval_cp"] == 20
+        session.close()
+
+    def test_seed_pending_advice_noop_when_opponent_moves_first(self):
+        backend = make_backend_client()
+        engine = ScriptedAnalysingEngine([20])
+        session = CompanionSession(backend, LocalEngineAdvisor(engine))
+        session.start("black", 1200)  # il bianco (avversario) muove per primo
+
+        console, buf = make_capture_console()
+        _seed_pending_advice(session, console, 150)
+
+        assert buf.getvalue() == ""
+        assert session.pending_player_advice is None
+        assert engine.analyse_calls == 0
+        session.close()
+
+    def test_seed_pending_advice_noop_in_default_mode(self):
+        backend = make_backend_client()
+        engine = ScriptedAnalysingEngine([20])
+        session = CompanionSession(backend, LocalEngineAdvisor(engine))
+        session.start("white", 1200)
+
+        console, buf = make_capture_console()
+        _seed_pending_advice(session, console, None)
+
+        assert buf.getvalue() == ""
+        assert engine.analyse_calls == 0
+        session.close()
+
+
+class TestAutoHintCliFlag:
+    """`cli/__main__.py:_build_arg_parser` — il flag `--auto-hint-threshold`,
+    riconciliato nello stesso parser mutuamente esclusivo di `--resume`/
+    `--fen`/`--pgn`/`--pgn-file` (i due parser separati scritti in parallelo
+    dalle due branch Wave 2 sono stati unificati in un solo `ArgumentParser`
+    in fase di merge)."""
+
+    def test_flag_omitted_defaults_to_none(self):
+        parser = _build_arg_parser()
+        args = parser.parse_args([])
+        assert args.auto_hint_threshold is None
+
+    def test_flag_parses_integer_value(self):
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--auto-hint-threshold", "150"])
+        assert args.auto_hint_threshold == 150
+
+    def test_flag_composes_with_resume(self):
+        parser = _build_arg_parser()
+        args = parser.parse_args(["--resume", "a1b2c3d4", "--auto-hint-threshold", "150"])
+        assert args.resume == "a1b2c3d4"
+        assert args.auto_hint_threshold == 150
+
+    def test_main_wiring_passes_auto_hint_threshold_through(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("cli.__main__.run", lambda **kw: captured.update(kw))
+        monkeypatch.setattr(sys, "argv", ["prog", "--auto-hint-threshold", "150"])
+
+        cli_main()
+
+        assert captured == {
+            "resume_game_id": None,
+            "start_fen": None,
+            "auto_hint_threshold": 150,
+        }

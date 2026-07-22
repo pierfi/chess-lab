@@ -1,21 +1,28 @@
 """Entry point per ``python -m chess_app.cli`` (design doc §11.6 — nessun
 console-script per questa MVP, un ``__main__.py`` basta).
 
-Wave 2 (roadmap Fase 8 Wave 2, design doc §11.6/§10 "metodi di input
-alternativi" promosso da backlog): aggiunge il parsing di riga di comando per
-tre modi di avvio/ripresa alternativi al flusso interattivo standard —
-mutuamente esclusivi tra loro:
+Wave 2 (roadmap Fase 8 Wave 2): aggiunge il parsing di riga di comando per
+quattro estensioni opt-in al flusso interattivo standard — tre modi di
+avvio/ripresa alternativi (mutuamente esclusivi TRA LORO, design doc
+§11.6/§10 "metodi di input alternativi" promosso da backlog) più un flag
+indipendente per la modalità silenziosa a soglia (design doc §10
+"auto-hint con soglia"), componibile con uno qualsiasi dei tre:
 
-  --resume GAME_ID   riprende una sessione companion interrotta
-                      (GET /game/{id}, vedi cli/session.py CompanionSession.resume)
-  --fen FEN          avvia una sessione NUOVA da una posizione FEN custom
-                      (start_fen esistente di POST /game/companion/new)
-  --pgn TESTO        avvia da una posizione derivata da un PGN parziale
-                      incollato inline (testo grezzo come argomento)
-  --pgn-file PATH    come --pgn, ma il testo viene letto da file
+  --resume GAME_ID          riprende una sessione companion interrotta
+                             (GET /game/{id}, vedi cli/session.py CompanionSession.resume)
+  --fen FEN                 avvia una sessione NUOVA da una posizione FEN custom
+                             (start_fen esistente di POST /game/companion/new)
+  --pgn TESTO                avvia da una posizione derivata da un PGN parziale
+                             incollato inline (testo grezzo come argomento)
+  --pgn-file PATH            come --pgn, ma il testo viene letto da file
+  --auto-hint-threshold CP  modalità silenziosa: pannello di consiglio completo
+                             automatico solo quando la TUA ultima mossa perde
+                             più di CP centipawn rispetto al meglio disponibile;
+                             sotto soglia, un riconoscimento minimo. ``/hint``
+                             resta sempre disponibile on-demand.
 
 Nessun flag → comportamento INVARIATO rispetto a Wave 1 (prompt interattivo
-colore/effort, posizione standard).
+colore/effort, posizione standard, pannello completo dopo ogni mossa).
 
 Il parsing/validazione del PGN (python-chess, ``cli/pgn_bootstrap.py`` — stesso
 pattern tollerante di ``POST /games/import`` lato backend, mai reimplementato
@@ -60,6 +67,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Come --pgn, ma il testo del PGN parziale viene letto da questo file.",
     )
+    parser.add_argument(
+        "--auto-hint-threshold",
+        type=int,
+        default=None,
+        metavar="CP",
+        help=(
+            "Modalità silenziosa opt-in: mostra il pannello di consiglio completo in automatico "
+            "solo quando la TUA ultima mossa perde più di CP centipawn rispetto al meglio "
+            "disponibile; sotto soglia, solo un riconoscimento minimo. /hint resta sempre "
+            "disponibile on-demand. Omesso = comportamento storico invariato (pannello completo "
+            "dopo ogni mossa, di chiunque). Componibile con --resume/--fen/--pgn/--pgn-file."
+        ),
+    )
     return parser
 
 
@@ -91,7 +111,11 @@ def main() -> None:
             print(f"PGN non valido: {exc}")
             sys.exit(1)
 
-    run(resume_game_id=resume_game_id, start_fen=start_fen)
+    run(
+        resume_game_id=resume_game_id,
+        start_fen=start_fen,
+        auto_hint_threshold=args.auto_hint_threshold,
+    )
 
 
 if __name__ == "__main__":
